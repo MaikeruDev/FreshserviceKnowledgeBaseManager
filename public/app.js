@@ -4,7 +4,8 @@
 
   // ---------------------------------------------------------------- state
   const state = {
-    config: null,
+    settings: null,            // browser-only credentials/settings (localStorage)
+    config: null,              // effective config: settings + server ENV defaults (flags only)
     categories: [],            // [{id,name,folders:[{id,name,category_id,articles:[]}]}]
     articlesByFolder: new Map(), // folderId -> articles[]
     allLoaded: false,
@@ -20,10 +21,90 @@
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
+  // ---------------------------------------------------------------- settings (browser-only storage)
+  // All keys live ONLY in this browser (localStorage) and are sent per request as headers.
+  // The server never persists them.
+  const SETTINGS_KEY = "fkm.settings";
+  const SETTINGS_FIELDS = ["freshserviceDomain", "freshserviceApiKey", "freshserviceWorkspaceId", "openaiApiKey", "aiModel", "aiEffort"];
+  const HEADER_NAMES = {
+    freshserviceDomain: "x-fs-domain",
+    freshserviceApiKey: "x-fs-key",
+    freshserviceWorkspaceId: "x-fs-workspace",
+    openaiApiKey: "x-openai-key",
+    aiModel: "x-ai-model",
+    aiEffort: "x-ai-effort",
+  };
+
+  function loadSettings() {
+    try {
+      const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
+      return Object.fromEntries(SETTINGS_FIELDS.map((k) => [k, typeof s[k] === "string" ? s[k] : ""]));
+    } catch {
+      return Object.fromEntries(SETTINGS_FIELDS.map((k) => [k, ""]));
+    }
+  }
+  function saveSettings(s) {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+    state.settings = s;
+    syncCredsToServiceWorker();
+  }
+  function clearSettings() {
+    localStorage.removeItem(SETTINGS_KEY);
+    state.settings = loadSettings();
+    syncCredsToServiceWorker();
+  }
+  function credHeaders() {
+    const h = {};
+    for (const [k, name] of Object.entries(HEADER_NAMES)) {
+      const v = state.settings?.[k];
+      if (v) h[name] = encodeURIComponent(v);
+    }
+    return h;
+  }
+
+  // The service worker adds the Freshservice headers to <img src="/api/fs/attachment/…"> requests
+  // (plain image tags cannot carry headers). It reads the creds from IndexedDB / a message — still browser-only.
+  function idbPutCreds(creds) {
+    return new Promise((resolve) => {
+      try {
+        const open = indexedDB.open("fkm", 1);
+        open.onupgradeneeded = () => open.result.createObjectStore("kv");
+        open.onerror = () => resolve(false);
+        open.onsuccess = () => {
+          try {
+            const tx = open.result.transaction("kv", "readwrite");
+            tx.objectStore("kv").put(creds, "creds");
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => resolve(false);
+          } catch { resolve(false); }
+        };
+      } catch { resolve(false); }
+    });
+  }
+  async function syncCredsToServiceWorker() {
+    const s = state.settings || {};
+    const creds = { freshserviceDomain: s.freshserviceDomain, freshserviceApiKey: s.freshserviceApiKey, freshserviceWorkspaceId: s.freshserviceWorkspaceId };
+    await idbPutCreds(creds);
+    try {
+      const reg = await navigator.serviceWorker?.getRegistration();
+      reg?.active?.postMessage({ type: "creds", creds });
+    } catch { /* no SW */ }
+  }
+  async function registerServiceWorker() {
+    if (!("serviceWorker" in navigator)) return;
+    try {
+      await navigator.serviceWorker.register("/sw.js");
+      await navigator.serviceWorker.ready;
+      await syncCredsToServiceWorker();
+    } catch (e) {
+      console.warn("Service Worker nicht verfügbar (Bild-Vorschau von Freshservice-Anhängen ggf. eingeschränkt):", e);
+    }
+  }
+
   // ---------------------------------------------------------------- utils
   async function api(path, opts = {}) {
     const res = await fetch(path, {
-      headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
+      headers: { "Content-Type": "application/json", ...credHeaders(), ...(opts.headers || {}) },
       ...opts,
       body: opts.body !== undefined && typeof opts.body !== "string" ? JSON.stringify(opts.body) : opts.body,
     });
@@ -78,10 +159,23 @@
     return null;
   }
 
+  /** Same normalization as the server: "acme" → https://acme.freshservice.com; full URLs are kept. */
   function fsBaseUrl() {
-    const d = state.config?.freshserviceDomain || "";
+    let d = String(state.config?.freshserviceDomain || "").trim();
     if (!d) return "";
-    return `https://${d.replace(/^https?:\/\//, "").replace(/\/$/, "")}`;
+    const m = d.match(/^(https?):\/\//i);
+    const scheme = m ? m[1].toLowerCase() : "https";
+    d = d.replace(/^https?:\/\//i, "").replace(/\/.*$/, "");
+    if (!d.includes(".") && !d.includes(":")) d = `${d}.freshservice.com`;
+    return `${scheme}://${d}`;
+  }
+
+  /** Freshservice attachment images need a login session; route them through the local proxy for display in the app. */
+  function displayHtml(html) {
+    const base = fsBaseUrl();
+    if (!base || !html) return html || "";
+    const re = new RegExp(base.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&") + "/helpdesk/attachments/(\\d+)", "g");
+    return html.replace(re, "/api/fs/attachment/$1");
   }
 
   function splitList(str) {
@@ -103,22 +197,50 @@
   );
 
   // ---------------------------------------------------------------- config / settings
+  /**
+   * Effective config = browser settings, falling back to server ENV defaults (the server only tells us
+   * whether such defaults exist; it never sends key values).
+   */
   async function loadConfig() {
-    state.config = await api("/api/config");
+    state.settings = loadSettings();
+    let server = { envDefaults: {}, defaults: { aiModel: "gpt-5.5", aiEffort: "medium" } };
+    try { server = await api("/api/config"); } catch (e) { toast("Server nicht erreichbar: " + e.message, "err"); }
+    const env = server.envDefaults || {};
+    const s = state.settings;
+    state.config = {
+      freshserviceDomain: s.freshserviceDomain || env.freshserviceDomain || "",
+      freshserviceWorkspaceId: s.freshserviceWorkspaceId || env.freshserviceWorkspaceId || "",
+      hasFreshserviceKey: Boolean(s.freshserviceApiKey) || Boolean(env.hasFreshserviceKey),
+      hasOpenaiKey: Boolean(s.openaiApiKey) || Boolean(env.hasOpenaiKey),
+      aiModel: s.aiModel || env.aiModel || server.defaults?.aiModel || "gpt-5.5",
+      aiEffort: s.aiEffort || env.aiEffort || server.defaults?.aiEffort || "medium",
+      keySources: {
+        freshservice: s.freshserviceApiKey ? "browser" : env.hasFreshserviceKey ? "env" : "none",
+        openai: s.openaiApiKey ? "browser" : env.hasOpenaiKey ? "env" : "none",
+      },
+    };
+
     const chip = $("#conn-chip");
     if (state.config.freshserviceDomain && state.config.hasFreshserviceKey) {
-      chip.textContent = state.config.freshserviceDomain;
+      chip.textContent = fsBaseUrl().replace(/^https?:\/\//, "");
       chip.className = "chip chip-ok";
     } else {
       chip.textContent = "nicht konfiguriert";
       chip.className = "chip chip-warn";
     }
-    $("#cfg-domain").value = state.config.freshserviceDomain || "";
-    $("#cfg-workspace").value = state.config.freshserviceWorkspaceId || "";
-    $("#cfg-model").value = state.config.aiModel || "gpt-5.5";
-    $("#cfg-effort").value = state.config.aiEffort || "medium";
-    $("#cfg-fs-hint").textContent = state.config.hasFreshserviceKey ? `(gespeichert${state.config.keySources.freshservice === "env" ? ", aus ENV" : ""})` : "(nicht gesetzt)";
-    $("#cfg-ai-hint").textContent = state.config.hasOpenaiKey ? `(gespeichert${state.config.keySources.openai === "env" ? ", aus ENV" : ""})` : "(nicht gesetzt)";
+    // settings form: values come straight from this browser's storage
+    $("#cfg-domain").value = s.freshserviceDomain || (env.freshserviceDomain ? "" : "");
+    $("#cfg-domain").placeholder = env.freshserviceDomain ? `Server-Standard: ${env.freshserviceDomain}` : "meinefirma  oder  meinefirma.freshservice.com";
+    $("#cfg-fs-key").value = s.freshserviceApiKey || "";
+    $("#cfg-workspace").value = s.freshserviceWorkspaceId || "";
+    $("#cfg-ai-key").value = s.openaiApiKey || "";
+    $("#cfg-model").value = s.aiModel || state.config.aiModel;
+    $("#cfg-effort").value = s.aiEffort || state.config.aiEffort;
+    const src = (which) => ({ browser: "(in diesem Browser gespeichert)", env: "(Server-Standard aus ENV aktiv – kann hier überschrieben werden)", none: "(nicht gesetzt)" }[state.config.keySources[which]]);
+    $("#cfg-fs-hint").textContent = src("freshservice");
+    $("#cfg-ai-hint").textContent = src("openai");
+    $("#cfg-fs-key").placeholder = env.hasFreshserviceKey ? "leer = Server-Standard verwenden" : "API-Key aus Freshservice";
+    $("#cfg-ai-key").placeholder = env.hasOpenaiKey ? "leer = Server-Standard verwenden" : "sk-…";
   }
 
   function openModal(id) { $(`#${id}`).classList.remove("hidden"); }
@@ -128,23 +250,22 @@
 
   $("#btn-settings").addEventListener("click", () => { setStatus("#cfg-test-result", ""); openModal("modal-settings"); });
 
+  function settingsFromForm() {
+    return {
+      freshserviceDomain: $("#cfg-domain").value.trim(),
+      freshserviceApiKey: $("#cfg-fs-key").value.trim(),
+      freshserviceWorkspaceId: $("#cfg-workspace").value.trim(),
+      openaiApiKey: $("#cfg-ai-key").value.trim(),
+      aiModel: $("#cfg-model").value.trim(),
+      aiEffort: $("#cfg-effort").value,
+    };
+  }
+
   $("#btn-cfg-save").addEventListener("click", async () => {
     try {
-      await api("/api/config", {
-        method: "POST",
-        body: {
-          freshserviceDomain: $("#cfg-domain").value,
-          freshserviceApiKey: $("#cfg-fs-key").value,
-          freshserviceWorkspaceId: $("#cfg-workspace").value,
-          openaiApiKey: $("#cfg-ai-key").value,
-          aiModel: $("#cfg-model").value,
-          aiEffort: $("#cfg-effort").value,
-        },
-      });
-      $("#cfg-fs-key").value = "";
-      $("#cfg-ai-key").value = "";
+      saveSettings(settingsFromForm()); // localStorage only — never sent to the server for storage
       await loadConfig();
-      toast("Einstellungen gespeichert", "ok");
+      toast("Einstellungen in diesem Browser gespeichert", "ok");
       closeModal("modal-settings");
       await loadTree(true);
     } catch (e) {
@@ -152,10 +273,22 @@
     }
   });
 
+  $("#btn-cfg-clear").addEventListener("click", async () => {
+    if (!confirm("Alle gespeicherten Keys und Einstellungen aus diesem Browser löschen?")) return;
+    clearSettings();
+    await loadConfig();
+    setStatus("#cfg-test-result", "Alle Keys wurden aus diesem Browser entfernt.", "ok");
+    $("#tree").innerHTML = '<div class="muted small pad">Bitte zuerst Freshservice in den Einstellungen konfigurieren.</div>';
+  });
+
   $("#btn-cfg-test").addEventListener("click", async () => {
-    setStatus("#cfg-test-result", '<span class="spinner"></span>Teste… (speichere vorher, falls du Werte geändert hast)', "info");
+    setStatus("#cfg-test-result", '<span class="spinner"></span>Teste mit den aktuell eingetragenen Werten…', "info");
     try {
-      const r = await api("/api/config/test", { method: "POST" });
+      // test with the form values (not yet saved) — sent as headers for this one request only
+      const form = settingsFromForm();
+      const headers = {};
+      for (const [k, name] of Object.entries(HEADER_NAMES)) if (form[k]) headers[name] = encodeURIComponent(form[k]);
+      const r = await api("/api/config/test", { method: "POST", headers });
       const parts = [];
       parts.push(r.freshservice?.ok
         ? `<div class="msg msg-ok">Freshservice OK – ${r.freshservice.categories} Kategorien unter ${esc(r.freshservice.baseUrl)}</div>`
@@ -492,7 +625,7 @@
       if (!state.allLoaded) return toast("Für Tag-Filter erst „Alle Artikel laden“.", "");
       selectTag(p.dataset.tag);
     }));
-    $("#detail-body").innerHTML = sanitize(a.description || "");
+    $("#detail-body").innerHTML = sanitize(displayHtml(a.description || ""));
     $("#detail-html").textContent = a.description || "";
     const base = fsBaseUrl();
     const link = $("#detail-open-fs");
@@ -525,6 +658,21 @@
   });
 
   // ---------------------------------------------------------------- editor (TinyMCE)
+  /** TinyMCE images_upload_handler: send the image to the local temp store, return the URL to embed. */
+  async function uploadEditorImage(blobInfo, progress) {
+    const blob = blobInfo.blob();
+    progress?.(10);
+    const res = await fetch("/api/uploads", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: blobInfo.filename(), mime: blob.type || "image/png", data: blobInfo.base64() }),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error || `Upload fehlgeschlagen (${res.status})`);
+    progress?.(100);
+    return json.url;
+  }
+
   function ensureTinyMce() {
     if (state.editor.tinyReady || !window.tinymce) return;
     state.editor.tinyReady = true;
@@ -542,7 +690,14 @@
       convert_urls: false,
       relative_urls: false,
       remove_script_host: false,
-      paste_data_images: false,
+      // Images: upload tab in the image dialog, paste (Ctrl+V) and drag & drop all go through
+      // images_upload_handler → temporary local store → attached to the Freshservice article on save.
+      images_upload_handler: uploadEditorImage,
+      automatic_uploads: true,
+      paste_data_images: true,
+      images_file_types: "jpeg,jpg,png,gif,webp",
+      image_title: true,
+      image_dimensions: true,
       image_caption: false,
       // keep the Freshservice-specific attributes the KI agent produces (code blocks, intro paragraph id)
       extended_valid_elements:
@@ -570,9 +725,15 @@
     if (ed && ed.initialized) ed.setContent(html || "");
     else state.editor.pendingHtml = html || "";
   }
-  function getEditorHtml() {
+  async function getEditorHtml() {
     const ed = window.tinymce && tinymce.get("editor-body");
-    return ed ? ed.getContent() : $("#editor-body").value;
+    if (!ed) return $("#editor-body").value;
+    try { await ed.uploadImages(); } catch { /* pending uploads failing surface as broken images; save continues */ }
+    return ed.getContent();
+  }
+
+  function imagesToast(base, images) {
+    return images?.attached ? `${base} – ${images.attached} Bild(er) als Anhang hochgeladen` : base;
   }
 
   function openEditor({ mode, article = null, prefill = null }) {
@@ -596,7 +757,7 @@
       fillEditorFolders();
     }
     showView("editor");
-    setEditorHtml(src.description || "");
+    setEditorHtml(displayHtml(src.description || ""));
     setTimeout(() => $("#ed-title").focus(), 50);
   }
 
@@ -606,7 +767,7 @@
 
   $("#btn-editor-save").addEventListener("click", async () => {
     const title = $("#ed-title").value.trim();
-    const description = getEditorHtml().trim();
+    const description = (await getEditorHtml()).trim();
     const folder_id = $("#ed-folder").value;
     if (!title) return setStatus("#editor-status", "Titel fehlt.", "err");
     if (!description) return setStatus("#editor-status", "Inhalt fehlt.", "err");
@@ -625,13 +786,16 @@
     btn.disabled = true;
     setStatus("#editor-status", '<span class="spinner"></span>Speichere in Freshservice…', "info");
     try {
-      let article;
+      let article, images;
       if (state.editor.mode === "edit" && state.editor.articleId) {
-        ({ article } = await api(`/api/fs/articles/${state.editor.articleId}`, { method: "PUT", body: payload }));
-        toast("Artikel aktualisiert", "ok");
+        ({ article, images } = await api(`/api/fs/articles/${state.editor.articleId}`, { method: "PUT", body: payload }));
+        toast(imagesToast("Artikel aktualisiert", images), "ok");
       } else {
-        ({ article } = await api("/api/fs/articles", { method: "POST", body: payload }));
-        toast("Artikel angelegt", "ok");
+        ({ article, images } = await api("/api/fs/articles", { method: "POST", body: payload }));
+        toast(imagesToast("Artikel angelegt", images), "ok");
+      }
+      if (images?.unmapped?.length || images?.missing?.length) {
+        toast(`Achtung: ${(images.unmapped || []).length + (images.missing || []).length} Bild(er) konnten nicht als Anhang zugeordnet werden – bitte Artikel prüfen.`, "err");
       }
       // refresh folder cache & show
       await loadFolderArticles(article.folder_id, true);
@@ -665,7 +829,7 @@
     $("#ai-title").textContent = article.title || "";
     $("#ai-tags").innerHTML =
       (article.tags || []).map((t) => `<span class="tag-pill">🏷 ${esc(t)}</span>`).join("");
-    $("#ai-preview").innerHTML = sanitize(article.description_html || "");
+    $("#ai-preview").innerHTML = sanitize(displayHtml(article.description_html || ""));
     $("#ai-html").textContent = article.description_html || "";
     $("#ai-notes").textContent = article.notes_for_reviewer || "–";
     $("#ai-keywords").textContent = (article.keywords || []).length ? `Keywords: ${article.keywords.join(", ")}` : "";
@@ -824,12 +988,9 @@
 
   // ---------------------------------------------------------------- init
   (async function init() {
-    try {
-      await loadConfig();
-    } catch (e) {
-      toast("Server nicht erreichbar: " + e.message, "err");
-      return;
-    }
+    state.settings = loadSettings();
+    registerServiceWorker(); // in background; needed only for attachment image previews
+    await loadConfig();
     if (!state.config.hasFreshserviceKey || !state.config.freshserviceDomain) {
       openModal("modal-settings");
     }

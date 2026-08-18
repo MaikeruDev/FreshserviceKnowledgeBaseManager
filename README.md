@@ -24,7 +24,11 @@ Beim ersten Start öffnet sich das Einstellungsfenster:
 | OpenAI-API-Key | https://platform.openai.com/api-keys |
 | Modell / Reasoning-Effort | Standard `gpt-5.5` / `medium` (Modell frei editierbar; Effort nur für gpt-5*/o-Modelle) |
 
-Die Keys werden lokal in `data/config.json` gespeichert (gitignored) und ausschließlich vom lokalen Node-Server verwendet — der Browser sieht sie nie. Alternativ per Umgebungsvariablen: `FRESHSERVICE_DOMAIN`, `FRESHSERVICE_API_KEY`, `FRESHSERVICE_WORKSPACE_ID`, `OPENAI_API_KEY` (ENV hat Vorrang). Port/Host über `PORT` / `HOST`.
+**Key-Speicherung: ausschließlich im Browser.** Alle Zugangsdaten liegen nur im `localStorage` des Browsers und werden bei jeder Anfrage als Header (`x-fs-domain`, `x-fs-key`, `x-fs-workspace`, `x-openai-key`, `x-ai-model`, `x-ai-effort`) an den App-Server geschickt, der sie nur an Freshservice/OpenAI durchreicht und **nichts persistiert** (kein Config-File, keine Datenbank). Damit auch `<img>`-Vorschauen von Freshservice-Anhängen funktionieren, ergänzt ein Service Worker (`public/sw.js`) diese Header im Browser. „Keys löschen“ in den Einstellungen entfernt alles wieder.
+
+Optional kann der Betreiber Server-Standardwerte per Umgebungsvariablen setzen (`FRESHSERVICE_DOMAIN`, `FRESHSERVICE_API_KEY`, `FRESHSERVICE_WORKSPACE_ID`, `OPENAI_API_KEY`, `AI_MODEL`, `AI_EFFORT`) — im Browser eingetragene Werte haben Vorrang. Port/Host über `PORT` / `HOST`.
+
+> Wird die App nicht nur lokal, sondern für mehrere Nutzer auf einem Server betrieben: unbedingt **HTTPS** verwenden (Keys gehen als Header über die Leitung; der Service Worker läuft nur in sicheren Kontexten — `localhost` gilt als sicher).
 
 ## KI-Agent
 
@@ -33,7 +37,8 @@ Ein Custom GPT aus ChatGPT lässt sich nicht direkt per API aufrufen; deshalb st
 ## Hinweise
 
 - **„Alle Artikel laden“** holt jeden Artikel aller Ordner (viele API-Calls, Freshservice-Rate-Limit beachten). Danach funktionieren Tag-Cloud, Tag-Filter und lokale Volltextsuche. Ohne das wird die Freshservice-Suche (`/solutions/articles/search`) verwendet.
-- Freshservice erwartet im Feld `description` HTML. Der Editor behält die Freshservice-spezifischen Attribute der Code-Blöcke bei (`extended_valid_elements`). Bilder bitte per URL einbinden — Base64-Bilder werden beim Einfügen bewusst nicht erzeugt.
+- Freshservice erwartet im Feld `description` HTML. Der Editor behält die Freshservice-spezifischen Attribute der Code-Blöcke bei (`extended_valid_elements`).
+- **Bilder**: Die Freshservice-API akzeptiert keine Base64-Bilder im Artikel-HTML. Deshalb werden Bilder aus dem Editor (Upload-Tab, Strg+V, Drag&Drop) zunächst lokal zwischengespeichert (`/api/uploads/<id>`, In-Memory, 24 h) und beim Speichern per Multipart als `attachments[]` an den Artikel gehängt; anschließend wird `<img src>` auf die dauerhafte `canonical_url` (`https://<domain>/helpdesk/attachments/<id>`) umgeschrieben. In der App-Vorschau werden diese Bilder über `/api/fs/attachment/<id>` geproxyt (Basic-Auth mit API-Key), damit sie ohne Freshservice-Login-Cookie sichtbar sind.
 - Die KI liefert immer den **kompletten** Artikel zurück (auch bei kleinen Änderungswünschen); der Verlauf wird pro Sitzung im Browser gehalten. Titel in der Vorschau ist direkt editierbar.
 - Freshservice-Werte: `status` 1 = Entwurf, 2 = Veröffentlicht; `article_type` 1 = Permanent, 2 = Workaround.
 
@@ -51,7 +56,7 @@ In den Einstellungen als Domain `http://127.0.0.1:3901` und einen beliebigen API
 server.js            Express-Server: Config, Freshservice-Proxy, KI-Endpunkt
 lib/freshservice.js  Freshservice API v2 Client (Solutions)
 lib/ai.js            OpenAI-Aufruf (Chat Completions, Structured Output) + Agent-Prompt
-lib/config.js        Speichern/Laden der Einstellungen
-public/              Frontend (index.html, app.js, styles.css)
+lib/config.js        Credentials pro Request aus Headern (+ ENV-Defaults) – nichts wird gespeichert
+public/              Frontend (index.html, app.js, styles.css, sw.js)
 scripts/             Mock-Freshservice für lokale Tests
 ```

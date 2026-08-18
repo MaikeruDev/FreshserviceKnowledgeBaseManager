@@ -69,6 +69,9 @@
           <div class="empty">
             <p>Wähle links einen Ordner oder suche nach Artikeln.</p>
             <p class="muted small">Falls noch keine Verbindung besteht: oben rechts ⚙ Einstellungen öffnen und Freshservice-Domain + API-Key hinterlegen.</p>
+            <div class="disclaimer disclaimer-inline">
+              🔒 Deine Freshservice- und ChatGPT-Keys werden <b>ausschließlich in diesem Browser</b> gespeichert – nicht auf Servern.
+            </div>
           </div>
         </div>
       </div>
@@ -154,6 +157,9 @@
           <div id="editor-status" class="status-box"></div>
           <p class="muted small">
             Der Editor speichert sauberes HTML in das Freshservice-Feld <code>description</code>. Über <b>Tools → Quellcode</b> (Toolbar „&lt;&gt;“) kannst du das HTML direkt bearbeiten.
+          </p>
+          <p class="muted small">
+            <b>Bilder:</b> Bild-Button → Tab „Upload“, oder Screenshot per <kbd>Strg+V</kbd> einfügen bzw. Datei in den Editor ziehen. Beim Speichern werden die Bilder als Artikel-Anhang zu Freshservice hochgeladen und im Text automatisch auf die dauerhafte Freshservice-URL verlinkt.
           </p>
         </aside>
       </div>
@@ -253,6 +259,16 @@
         <button class="icon-btn" data-close="modal-settings">✕</button>
       </div>
       <div class="modal-body">
+        <div class="disclaimer">
+          <div class="disclaimer-title">🔒 Datenschutz-Hinweis zu deinen Keys</div>
+          <p>
+            Alle Zugangsdaten (<b>Freshservice-API-Key</b> und <b>OpenAI/ChatGPT-API-Key</b>) werden
+            <b>ausschließlich in diesem Browser</b> gespeichert (localStorage) und <b>nicht auf Servern</b> hinterlegt.
+            Der App-Server speichert keine Keys – er reicht sie pro Anfrage lediglich an Freshservice bzw. OpenAI weiter.
+            Beim Löschen der Browserdaten oder über „Keys löschen“ sind sie weg; auf einem anderen Gerät/Browser musst du sie erneut eingeben.
+          </p>
+        </div>
+
         <h3>Freshservice</h3>
         <label class="field">
           <span>Domain</span>
@@ -260,18 +276,18 @@
         </label>
         <label class="field">
           <span>API-Key <small class="muted" id="cfg-fs-hint"></small></span>
-          <input id="cfg-fs-key" type="password" placeholder="leer lassen = gespeicherten Key behalten" autocomplete="off" />
+          <input id="cfg-fs-key" type="password" placeholder="API-Key aus Freshservice" autocomplete="off" />
         </label>
         <label class="field">
           <span>Workspace-ID <small class="muted">(optional, nur bei mehreren Workspaces)</small></span>
           <input id="cfg-workspace" type="text" placeholder="z. B. 2" />
         </label>
-        <p class="muted small">Den API-Key findest du in Freshservice unter Profil → „API-Schlüssel“ (rechts). Der Key wird lokal in <code>data/config.json</code> gespeichert und nur vom lokalen Server benutzt.</p>
+        <p class="muted small">Den API-Key findest du in Freshservice unter Profil → „API-Schlüssel“ (rechts).</p>
 
         <h3>KI (OpenAI / ChatGPT)</h3>
         <label class="field">
           <span>OpenAI API-Key <small class="muted" id="cfg-ai-hint"></small></span>
-          <input id="cfg-ai-key" type="password" placeholder="sk-… (leer lassen = behalten)" autocomplete="off" />
+          <input id="cfg-ai-key" type="password" placeholder="sk-…" autocomplete="off" />
         </label>
         <div class="field-row">
           <label class="field">
@@ -297,13 +313,14 @@
             </select>
           </label>
         </div>
-        <p class="muted small">Der Key wird lokal in <code>data/config.json</code> gespeichert (oder per ENV <code>OPENAI_API_KEY</code>). Als System-Prompt werden die Instruktionen deines bestehenden „Freshservice KB“-GPTs verwendet (siehe <code>lib/ai.js</code>).</p>
+        <p class="muted small">Als System-Prompt werden die Instruktionen deines bestehenden „Freshservice KB“-GPTs verwendet (siehe <code>lib/ai.js</code>).</p>
         <div id="cfg-test-result" class="status-box"></div>
       </div>
       <div class="modal-foot">
         <button id="btn-cfg-test" class="btn btn-ghost">Verbindung testen</button>
+        <button id="btn-cfg-clear" class="btn btn-ghost btn-danger" title="Alle Keys aus diesem Browser entfernen">Keys löschen</button>
         <div class="spacer"></div>
-        <button id="btn-cfg-save" class="btn btn-primary">Speichern</button>
+        <button id="btn-cfg-save" class="btn btn-primary">Im Browser speichern</button>
       </div>
     </div>
   </div>
