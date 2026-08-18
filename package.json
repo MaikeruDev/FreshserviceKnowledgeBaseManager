@@ -1,0 +1,19 @@
+{
+  "name": "fresh-knowledge-manager",
+  "version": "1.0.0",
+  "description": "Freshservice Knowledge Base Manager mit besserem Editor und KI-Artikelgenerierung (Claude)",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "mock": "node scripts/mock-freshservice.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "dompurify": "^3.2.0",
+    "express": "^4.21.0",
+    "openai": "^7.5.0",
+    "tinymce": "^8.8.2"
+  }
+}

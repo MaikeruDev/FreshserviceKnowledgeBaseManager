@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fresh Knowledge Manager</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <script src="/vendor/dompurify/purify.min.js"></script>
+  <script src="/vendor/tinymce/tinymce.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">FK</span>
+      <span class="brand-name">Fresh Knowledge Manager</span>
+    </div>
+    <nav class="nav">
+      <button class="nav-btn active" data-view="browse">Knowledge Base</button>
+      <button class="nav-btn" data-view="editor" id="nav-add">+ Add KB</button>
+      <button class="nav-btn nav-ai" data-view="ai">✨ Add by AI</button>
+    </nav>
+    <div class="topbar-right">
+      <span id="conn-chip" class="chip chip-muted">nicht verbunden</span>
+      <button id="btn-settings" class="icon-btn" title="Einstellungen">⚙</button>
+    </div>
+  </header>
+
+  <!-- ============ BROWSE VIEW ============ -->
+  <main id="view-browse" class="view active">
+    <aside class="sidebar">
+      <div class="sidebar-search">
+        <input id="search-input" type="search" placeholder="Artikel suchen… (Enter)" autocomplete="off" />
+      </div>
+      <div class="sidebar-actions">
+        <button id="btn-load-all" class="btn btn-sm">Alle Artikel laden</button>
+        <button id="btn-refresh-tree" class="btn btn-sm btn-ghost" title="Struktur neu laden">↻</button>
+      </div>
+      <div id="load-status" class="muted small"></div>
+      <div class="sidebar-section-title">
+        <span>Kategorien &amp; Ordner</span>
+        <button id="btn-new-folder" class="link-btn small" title="Neuen Ordner anlegen">+ Ordner</button>
+      </div>
+      <div id="tree" class="tree"><div class="muted small pad">Noch nicht geladen.</div></div>
+      <div class="sidebar-section-title">
+        <span>Tags</span>
+        <span id="tags-count" class="muted small"></span>
+      </div>
+      <div id="tag-cloud" class="tag-cloud"><div class="muted small pad">Lade alle Artikel, um Tags zu sehen.</div></div>
+    </aside>
+
+    <section class="content">
+      <div id="list-panel" class="list-panel">
+        <div class="list-header">
+          <h2 id="list-title">Willkommen</h2>
+          <div class="list-tools">
+            <select id="list-status-filter" class="select-sm">
+              <option value="">Alle Status</option>
+              <option value="2">Veröffentlicht</option>
+              <option value="1">Entwurf</option>
+            </select>
+            <select id="list-sort" class="select-sm">
+              <option value="updated">Zuletzt geändert</option>
+              <option value="title">Titel A–Z</option>
+              <option value="views">Aufrufe</option>
+            </select>
+          </div>
+        </div>
+        <div id="article-list" class="article-list">
+          <div class="empty">
+            <p>Wähle links einen Ordner oder suche nach Artikeln.</p>
+            <p class="muted small">Falls noch keine Verbindung besteht: oben rechts ⚙ Einstellungen öffnen und Freshservice-Domain + API-Key hinterlegen.</p>
+          </div>
+        </div>
+      </div>
+
+      <div id="detail-panel" class="detail-panel hidden">
+        <div class="detail-toolbar">
+          <button id="btn-detail-back" class="btn btn-ghost btn-sm">← Liste</button>
+          <div class="spacer"></div>
+          <a id="detail-open-fs" class="btn btn-ghost btn-sm" target="_blank" rel="noopener">In Freshservice öffnen ↗</a>
+          <button id="btn-detail-edit" class="btn btn-sm">Bearbeiten</button>
+          <button id="btn-detail-delete" class="btn btn-sm btn-danger">Löschen</button>
+        </div>
+        <article class="detail">
+          <h1 id="detail-title"></h1>
+          <div id="detail-meta" class="meta-row"></div>
+          <div id="detail-tags" class="chips"></div>
+          <div id="detail-body" class="article-body"></div>
+          <details class="html-source">
+            <summary>HTML-Quelltext anzeigen</summary>
+            <pre id="detail-html"></pre>
+          </details>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============ EDITOR VIEW ============ -->
+  <main id="view-editor" class="view">
+    <div class="editor-wrap">
+      <div class="editor-head">
+        <h2 id="editor-heading">Neuer Artikel</h2>
+        <div class="editor-head-actions">
+          <button id="btn-editor-cancel" class="btn btn-ghost">Abbrechen</button>
+          <button id="btn-editor-save" class="btn btn-primary">Speichern</button>
+        </div>
+      </div>
+      <div class="editor-grid">
+        <div class="editor-main">
+          <label class="field">
+            <span>Titel *</span>
+            <input id="ed-title" type="text" placeholder="z. B. VPN einrichten unter Windows 11" />
+          </label>
+          <div class="field">
+            <span>Inhalt *</span>
+            <textarea id="editor-body"></textarea>
+          </div>
+        </div>
+        <aside class="editor-side">
+          <label class="field">
+            <span>Kategorie</span>
+            <select id="ed-category"></select>
+          </label>
+          <label class="field">
+            <span>Ordner *</span>
+            <select id="ed-folder"></select>
+          </label>
+          <label class="field">
+            <span>Status</span>
+            <select id="ed-status">
+              <option value="1">Entwurf</option>
+              <option value="2">Veröffentlicht</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Typ</span>
+            <select id="ed-type">
+              <option value="1">Permanent</option>
+              <option value="2">Workaround</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Tags <small class="muted">(kommagetrennt)</small></span>
+            <input id="ed-tags" type="text" placeholder="vpn, windows, remote" />
+          </label>
+          <label class="field">
+            <span>Keywords <small class="muted">(kommagetrennt)</small></span>
+            <input id="ed-keywords" type="text" placeholder="Suchbegriffe, Synonyme" />
+          </label>
+          <label class="field">
+            <span>Review-Datum</span>
+            <input id="ed-review" type="date" />
+          </label>
+          <div id="editor-status" class="status-box"></div>
+          <p class="muted small">
+            Der Editor speichert sauberes HTML in das Freshservice-Feld <code>description</code>. Über <b>Tools → Quellcode</b> (Toolbar „&lt;&gt;“) kannst du das HTML direkt bearbeiten.
+          </p>
+        </aside>
+      </div>
+    </div>
+  </main>
+
+  <!-- ============ AI VIEW ============ -->
+  <main id="view-ai" class="view">
+    <div class="ai-grid">
+      <section class="ai-left">
+        <h2>✨ Artikel per KI erstellen</h2>
+        <p class="muted small">Beschreibe grob, worum es geht (Stichpunkte, Confluence-Text, Chat-Verlauf …). ChatGPT (dein „Freshservice KB“-Agent) erstellt daraus einen strukturierten Artikel im Freshservice-HTML-Format, den du prüfen, ändern lassen und dann per API einfügen kannst. Standard: Ausgabe auf Englisch (Namen, Server, Pfade, Gruppen bleiben unverändert).</p>
+
+        <div id="ai-input-block">
+          <label class="field">
+            <span>Beschreibung / Stichpunkte *</span>
+            <textarea id="ai-description" rows="9" placeholder="z. B.: Anleitung wie Mitarbeiter den VPN-Client (Cisco AnyConnect) unter Windows installieren und sich mit MFA anmelden. Häufige Fehler: falsche Zeit auf dem Gerät, MFA-Code abgelaufen. Support: Ticket im Portal."></textarea>
+          </label>
+          <div class="field-row">
+            <label class="field">
+              <span>Sprache</span>
+              <select id="ai-language">
+                <option value="">Englisch (Agent-Standard)</option>
+                <option value="German (do not translate to English)">Deutsch</option>
+                <option value="German, formal (Sie)">Deutsch (Sie-Form)</option>
+                <option value="German, informal (Du)">Deutsch (Du-Form)</option>
+                <option value="same language as the source content (do not translate)">Wie Beschreibung</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Ziel-Ordner (optional)</span>
+              <select id="ai-folder"><option value="">– KI schlägt vor –</option></select>
+            </label>
+          </div>
+          <label class="check"><input id="ai-ctx-folders" type="checkbox" checked /> Ordnerliste als Kontext mitgeben (Ordner-Vorschlag)</label>
+          <label class="check"><input id="ai-ctx-titles" type="checkbox" checked /> Vorhandene Artikeltitel des Ordners als Stil-Kontext mitgeben</label>
+          <button id="btn-ai-generate" class="btn btn-primary btn-lg">Artikel generieren</button>
+        </div>
+
+        <div id="ai-conversation" class="ai-conversation hidden">
+          <h3>Review &amp; Änderungen</h3>
+          <div id="ai-log" class="ai-log"></div>
+          <label class="field">
+            <span>Änderung anfragen</span>
+            <textarea id="ai-change" rows="4" placeholder="z. B.: Schritt 3 ausführlicher, Screenshot-Platzhalter ergänzen, Ton förmlicher (Sie), Abschnitt „Bekannte Probleme“ hinzufügen…"></textarea>
+          </label>
+          <div class="btn-row">
+            <button id="btn-ai-change" class="btn">Änderung anwenden</button>
+            <button id="btn-ai-reset" class="btn btn-ghost">Neu starten</button>
+          </div>
+        </div>
+        <div id="ai-status" class="status-box"></div>
+      </section>
+
+      <section class="ai-right">
+        <div id="ai-empty" class="empty tall">
+          <p>Hier erscheint die Vorschau des generierten Artikels.</p>
+        </div>
+        <div id="ai-result" class="hidden">
+          <div class="ai-result-toolbar">
+            <div class="seg">
+              <button class="seg-btn active" data-mode="preview">Vorschau</button>
+              <button class="seg-btn" data-mode="html">HTML</button>
+            </div>
+            <div class="spacer"></div>
+            <button id="btn-ai-open-editor" class="btn btn-ghost">Im Editor öffnen</button>
+          </div>
+          <div class="ai-insert-bar">
+            <select id="ai-insert-folder"></select>
+            <select id="ai-insert-status">
+              <option value="1">als Entwurf</option>
+              <option value="2">veröffentlicht</option>
+            </select>
+            <button id="btn-ai-insert" class="btn btn-primary">In Freshservice einfügen</button>
+          </div>
+          <article class="detail">
+            <h1 id="ai-title" contenteditable="true" spellcheck="false" title="Titel direkt editierbar"></h1>
+            <div id="ai-tags" class="chips"></div>
+            <div id="ai-preview" class="article-body"></div>
+            <pre id="ai-html" class="html-view hidden"></pre>
+            <div class="ai-notes">
+              <div class="ai-notes-title">Hinweise für den Reviewer</div>
+              <div id="ai-notes"></div>
+              <div id="ai-keywords" class="muted small"></div>
+            </div>
+          </article>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <!-- ============ SETTINGS MODAL ============ -->
+  <div id="modal-settings" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>Einstellungen</h2>
+        <button class="icon-btn" data-close="modal-settings">✕</button>
+      </div>
+      <div class="modal-body">
+        <h3>Freshservice</h3>
+        <label class="field">
+          <span>Domain</span>
+          <input id="cfg-domain" type="text" placeholder="meinefirma  oder  meinefirma.freshservice.com" />
+        </label>
+        <label class="field">
+          <span>API-Key <small class="muted" id="cfg-fs-hint"></small></span>
+          <input id="cfg-fs-key" type="password" placeholder="leer lassen = gespeicherten Key behalten" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span>Workspace-ID <small class="muted">(optional, nur bei mehreren Workspaces)</small></span>
+          <input id="cfg-workspace" type="text" placeholder="z. B. 2" />
+        </label>
+        <p class="muted small">Den API-Key findest du in Freshservice unter Profil → „API-Schlüssel“ (rechts). Der Key wird lokal in <code>data/config.json</code> gespeichert und nur vom lokalen Server benutzt.</p>
+
+        <h3>KI (OpenAI / ChatGPT)</h3>
+        <label class="field">
+          <span>OpenAI API-Key <small class="muted" id="cfg-ai-hint"></small></span>
+          <input id="cfg-ai-key" type="password" placeholder="sk-… (leer lassen = behalten)" autocomplete="off" />
+        </label>
+        <div class="field-row">
+          <label class="field">
+            <span>Modell <small class="muted">(frei editierbar)</small></span>
+            <input id="cfg-model" type="text" list="model-list" placeholder="gpt-5.5" />
+            <datalist id="model-list">
+              <option value="gpt-5.5">gpt-5.5 (empfohlen)</option>
+              <option value="gpt-5.4">gpt-5.4</option>
+              <option value="gpt-5.4-mini">gpt-5.4-mini (schneller/günstiger)</option>
+              <option value="gpt-5.1">gpt-5.1</option>
+              <option value="gpt-5">gpt-5</option>
+              <option value="gpt-5-mini">gpt-5-mini</option>
+              <option value="gpt-4.1">gpt-4.1 (kein Reasoning)</option>
+            </datalist>
+          </label>
+          <label class="field">
+            <span>Reasoning-Effort <small class="muted">(nur gpt-5*/o-Modelle)</small></span>
+            <select id="cfg-effort">
+              <option value="minimal">minimal</option>
+              <option value="low">low</option>
+              <option value="medium">medium (empfohlen)</option>
+              <option value="high">high</option>
+            </select>
+          </label>
+        </div>
+        <p class="muted small">Der Key wird lokal in <code>data/config.json</code> gespeichert (oder per ENV <code>OPENAI_API_KEY</code>). Als System-Prompt werden die Instruktionen deines bestehenden „Freshservice KB“-GPTs verwendet (siehe <code>lib/ai.js</code>).</p>
+        <div id="cfg-test-result" class="status-box"></div>
+      </div>
+      <div class="modal-foot">
+        <button id="btn-cfg-test" class="btn btn-ghost">Verbindung testen</button>
+        <div class="spacer"></div>
+        <button id="btn-cfg-save" class="btn btn-primary">Speichern</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ NEW FOLDER MODAL ============ -->
+  <div id="modal-folder" class="modal hidden">
+    <div class="modal-card modal-sm">
+      <div class="modal-head">
+        <h2>Neuer Ordner</h2>
+        <button class="icon-btn" data-close="modal-folder">✕</button>
+      </div>
+      <div class="modal-body">
+        <label class="field"><span>Kategorie</span><select id="nf-category"></select></label>
+        <label class="field"><span>Name</span><input id="nf-name" type="text" /></label>
+        <label class="field"><span>Beschreibung</span><input id="nf-desc" type="text" /></label>
+        <label class="field">
+          <span>Sichtbarkeit</span>
+          <select id="nf-visibility">
+            <option value="1">Alle Nutzer</option>
+            <option value="2">Angemeldete Nutzer</option>
+            <option value="3">Nur Agenten</option>
+          </select>
+        </label>
+        <div id="nf-status" class="status-box"></div>
+      </div>
+      <div class="modal-foot">
+        <div class="spacer"></div>
+        <button id="btn-nf-save" class="btn btn-primary">Anlegen</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
