@@ -24,11 +24,11 @@ Beim ersten Start öffnet sich das Einstellungsfenster:
 | OpenAI-API-Key | https://platform.openai.com/api-keys |
 | Modell / Reasoning-Effort | Standard `gpt-5.5` / `medium` (Modell frei editierbar; Effort nur für gpt-5*/o-Modelle) |
 
-**Key-Speicherung: ausschließlich im Browser.** Alle Zugangsdaten liegen nur im `localStorage` des Browsers und werden bei jeder Anfrage als Header (`x-fs-domain`, `x-fs-key`, `x-fs-workspace`, `x-openai-key`, `x-ai-model`, `x-ai-effort`) an den App-Server geschickt, der sie nur an Freshservice/OpenAI durchreicht und **nichts persistiert** (kein Config-File, keine Datenbank). Damit auch `<img>`-Vorschauen von Freshservice-Anhängen funktionieren, ergänzt ein Service Worker (`public/sw.js`) diese Header im Browser. „Keys löschen“ in den Einstellungen entfernt alles wieder.
+**Key-Speicherung: ausschließlich im Browser.** Alle Zugangsdaten liegen nur im `localStorage` des Browsers und werden bei jeder Anfrage als Header (`x-fs-domain`, `x-fs-key`, `x-fs-workspace`, `x-openai-key`, `x-ai-model`, `x-ai-effort`) an den App-Server geschickt, der sie nur an Freshservice/OpenAI durchreicht und **nichts persistiert** (kein Config-File, keine Datenbank). Damit auch `<img>`-Vorschauen von Freshservice-Anhängen funktionieren (Bild-Tags können keine Header senden), setzt die App zusätzlich ein Cookie `fkm_fs`, das **nur für den Pfad `/api/fs/attachment`** gilt (SameSite=Strict, Secure bei HTTPS) — ebenfalls rein browserseitig; der Server liest es pro Anfrage und speichert nichts. „Keys löschen“ in den Einstellungen entfernt alles wieder.
 
 Optional kann der Betreiber Server-Standardwerte per Umgebungsvariablen setzen (`FRESHSERVICE_DOMAIN`, `FRESHSERVICE_API_KEY`, `FRESHSERVICE_WORKSPACE_ID`, `OPENAI_API_KEY`, `AI_MODEL`, `AI_EFFORT`) — im Browser eingetragene Werte haben Vorrang. Port/Host über `PORT` / `HOST`.
 
-> Wird die App nicht nur lokal, sondern für mehrere Nutzer auf einem Server betrieben: unbedingt **HTTPS** verwenden (Keys gehen als Header über die Leitung; der Service Worker läuft nur in sicheren Kontexten — `localhost` gilt als sicher).
+> Wird die App nicht nur lokal, sondern für mehrere Nutzer auf einem Server betrieben: unbedingt **HTTPS** verwenden (Keys gehen als Header über die Leitung; das Vorschau-Cookie wird bei HTTPS mit `Secure` gesetzt).
 
 ## KI-Agent
 
@@ -63,6 +63,6 @@ server.js            Express-Server: Config, Freshservice-Proxy, KI-Endpunkt
 lib/freshservice.js  Freshservice API v2 Client (Solutions)
 lib/ai.js            OpenAI-Aufruf (Chat Completions, Structured Output) + Agent-Prompt
 lib/config.js        Credentials pro Request aus Headern (+ ENV-Defaults) – nichts wird gespeichert
-public/              Frontend (index.html, app.js, styles.css, sw.js)
+public/              Frontend (index.html, app.js, styles.css; sw.js = Legacy-Stub, deregistriert sich selbst)
 scripts/             Mock-Freshservice für lokale Tests
 ```

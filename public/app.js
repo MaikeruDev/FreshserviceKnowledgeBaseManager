@@ -51,12 +51,12 @@
   function saveSettings(s) {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
     state.settings = s;
-    syncCredsToServiceWorker();
+    syncAttachmentCookie();
   }
   function clearSettings() {
     localStorage.removeItem(SETTINGS_KEY);
     state.settings = loadSettings();
-    syncCredsToServiceWorker();
+    syncAttachmentCookie();
   }
   function credHeaders() {
     const h = {};
@@ -67,43 +67,29 @@
     return h;
   }
 
-  // The service worker adds the Freshservice headers to <img src="/api/fs/attachment/…"> requests
-  // (plain image tags cannot carry headers). It reads the creds from IndexedDB / a message — still browser-only.
-  function idbPutCreds(creds) {
-    return new Promise((resolve) => {
-      try {
-        const open = indexedDB.open("fkm", 1);
-        open.onupgradeneeded = () => open.result.createObjectStore("kv");
-        open.onerror = () => resolve(false);
-        open.onsuccess = () => {
-          try {
-            const tx = open.result.transaction("kv", "readwrite");
-            tx.objectStore("kv").put(creds, "creds");
-            tx.oncomplete = () => resolve(true);
-            tx.onerror = () => resolve(false);
-          } catch { resolve(false); }
-        };
-      } catch { resolve(false); }
-    });
-  }
-  async function syncCredsToServiceWorker() {
+  // <img src="/api/fs/attachment/…"> requests cannot carry custom headers, so the Freshservice creds are additionally
+  // kept in a cookie scoped to exactly that path (browser-only, like localStorage; the server reads it per request and
+  // never stores it). SameSite=Strict, Secure on https. Cleared together with the settings.
+  const ATTACHMENT_COOKIE_PATH = "/api/fs/attachment";
+  function syncAttachmentCookie() {
     const s = state.settings || {};
-    const creds = { freshserviceDomain: s.freshserviceDomain, freshserviceApiKey: s.freshserviceApiKey, freshserviceWorkspaceId: s.freshserviceWorkspaceId };
-    await idbPutCreds(creds);
-    try {
-      const reg = await navigator.serviceWorker?.getRegistration();
-      reg?.active?.postMessage({ type: "creds", creds });
-    } catch { /* no SW */ }
+    const secure = location.protocol === "https:" ? "; Secure" : "";
+    const base = `fkm_fs=`;
+    const attrs = `; Path=${ATTACHMENT_COOKIE_PATH}; SameSite=Strict${secure}`;
+    if (s.freshserviceDomain || s.freshserviceApiKey) {
+      const value = encodeURIComponent(JSON.stringify({ d: s.freshserviceDomain || "", k: s.freshserviceApiKey || "", w: s.freshserviceWorkspaceId || "" }));
+      document.cookie = `${base}${value}${attrs}; Max-Age=${60 * 60 * 24 * 400}`;
+    } else {
+      document.cookie = `${base}${attrs}; Max-Age=0`;
+    }
   }
-  async function registerServiceWorker() {
+  /** Earlier versions used a service worker for the same purpose — remove it so it cannot interfere. */
+  async function unregisterLegacyServiceWorker() {
     if (!("serviceWorker" in navigator)) return;
     try {
-      await navigator.serviceWorker.register("/sw.js");
-      await navigator.serviceWorker.ready;
-      await syncCredsToServiceWorker();
-    } catch (e) {
-      console.warn("Service Worker nicht verfügbar (Bild-Vorschau von Freshservice-Anhängen ggf. eingeschränkt):", e);
-    }
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map((r) => r.unregister()));
+    } catch { /* ignore */ }
   }
 
   // ---------------------------------------------------------------- utils
@@ -1135,7 +1121,8 @@
   (async function init() {
     state.settings = loadSettings();
     const hadSettingsBefore = Boolean(state.settings.freshserviceApiKey || state.settings.freshserviceDomain);
-    registerServiceWorker(); // in background; needed only for attachment image previews
+    syncAttachmentCookie(); // cookie for <img> attachment previews (path-scoped, browser-only)
+    unregisterLegacyServiceWorker();
     await loadConfig();
     if (!state.config.hasFreshserviceKey || !state.config.freshserviceDomain) {
       openModal("modal-settings");

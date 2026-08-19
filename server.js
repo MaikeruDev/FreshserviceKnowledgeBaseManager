@@ -13,8 +13,9 @@ const HOST = process.env.HOST || "127.0.0.1";
 const app = express();
 app.use(express.json({ limit: "40mb" })); // article HTML + base64 image uploads
 
-// Static frontend + vendored libraries (no CDN needed)
-app.use(express.static(path.join(__dirname, "public")));
+// Static frontend + vendored libraries (no CDN needed).
+// App files: always revalidate (ETag → 304) so deployments take effect without hard reloads.
+app.use(express.static(path.join(__dirname, "public"), { etag: true, lastModified: true, setHeaders: (res) => res.setHeader("Cache-Control", "no-cache") }));
 app.use("/vendor/tinymce", express.static(path.join(__dirname, "node_modules", "tinymce")));
 app.use("/vendor/dompurify", express.static(path.join(__dirname, "node_modules", "dompurify", "dist")));
 
