@@ -258,6 +258,11 @@ code { font-family: var(--mono); font-size: 0.92em; background: #eef1f5; padding
 .disclaimer-title { font-weight: 700; }
 .disclaimer-inline { display: inline-block; margin: 18px auto 0; max-width: 560px; }
 
+.identity-row { display: flex; align-items: center; gap: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; margin: 0 0 14px; font-size: 13px; }
+.identity-row .btn { margin-left: auto; }
+#identity-select { height: auto; font-family: var(--font); }
+#identity-select option { padding: 4px 6px; }
+
 /* ---------- toast ---------- */
 .toast {
   position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: #1c2431; color: #fff; padding: 10px 16px; border-radius: 10px;

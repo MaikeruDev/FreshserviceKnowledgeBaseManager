@@ -129,6 +129,10 @@
             <select id="ed-folder"></select>
           </label>
           <label class="field">
+            <span>Autor <small class="muted">(wer diesen Artikel verantwortet)</small></span>
+            <select id="ed-author"><option value="">– API-Benutzer (Standard von Freshservice) –</option></select>
+          </label>
+          <label class="field">
             <span>Status</span>
             <select id="ed-status">
               <option value="1">Entwurf</option>
@@ -283,6 +287,10 @@
           <input id="cfg-workspace" type="text" placeholder="z. B. 2" />
         </label>
         <p class="muted small">Den API-Key findest du in Freshservice unter Profil → „API-Schlüssel“ (rechts).</p>
+        <div class="identity-row">
+          <span>Ich bin: <b id="cfg-identity-name">– noch nicht festgelegt –</b></span>
+          <button id="btn-cfg-identity" class="btn btn-sm">Ändern</button>
+        </div>
 
         <h3>KI (OpenAI / ChatGPT)</h3>
         <label class="field">
@@ -321,6 +329,47 @@
         <button id="btn-cfg-clear" class="btn btn-ghost btn-danger" title="Alle Keys aus diesem Browser entfernen">Keys löschen</button>
         <div class="spacer"></div>
         <button id="btn-cfg-save" class="btn btn-primary">Im Browser speichern</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ IDENTITY MODAL ============ -->
+  <div id="modal-identity" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="identity-title">Wer bist du?</h2>
+        <button class="icon-btn" data-close="modal-identity" title="Später">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="identity-update-note" class="msg msg-warn hidden" style="margin-bottom:12px">
+          <b>Update:</b> Die App kann Artikel jetzt einem Autor zuordnen. Dafür musst du mir einmalig sagen, wer du bist.
+        </div>
+        <p class="small" style="margin-top:0">
+          Dieser Agent wird als <b>Autor</b> für Artikel vorbelegt, die du hier anlegst (im Editor kannst du pro Artikel jemand anderen wählen).
+        </p>
+        <label class="field">
+          <span>Agent suchen</span>
+          <input id="identity-search" type="search" placeholder="Name oder E-Mail…" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span>Agent</span>
+          <select id="identity-select" size="8"></select>
+        </label>
+        <div id="identity-status" class="status-box"></div>
+        <label class="check">
+          <input id="identity-byline" type="checkbox" checked />
+          Falls Freshservice den Autor nicht übernimmt: Zeile „Author: &lt;Name&gt;“ am Ende des Artikels ergänzen
+        </label>
+        <p class="muted small">
+          Hintergrund: Die Freshservice-API kennt kein Autor-Feld – offiziell wird immer der Besitzer des API-Keys als Autor eingetragen.
+          Die App versucht, den Autor trotzdem zu setzen (<code>agent_id</code>) und meldet dir nach dem Speichern, ob das geklappt hat.
+          Sicher ist der richtige Autor nur mit deinem <b>persönlichen</b> Freshservice-API-Key.
+        </p>
+      </div>
+      <div class="modal-foot">
+        <button id="btn-identity-later" class="btn btn-ghost">Später</button>
+        <div class="spacer"></div>
+        <button id="btn-identity-save" class="btn btn-primary">Das bin ich</button>
       </div>
     </div>
   </div>

@@ -87,6 +87,18 @@ const articles = [
   },
 ];
 
+articles.forEach((a, i) => { if (a.agent_id === undefined) a.agent_id = [7, 8, 1, 9][i % 4]; });
+
+// Like real Freshservice: the helpdesk attachment route is a web route (needs a browser session) and answers
+// with the login page even when Basic auth is sent; the signed storage URL (attachment_url) works without auth.
+app.get("/helpdesk/attachments/:id", (req, res) => {
+  const f = attachments.get(Number(req.params.id));
+  if (!f) return res.status(404).send("not found");
+  if (req.query.signed !== "1") return res.status(200).type("html").send("<html><body>InterBITE AG – You must be logged in to access this page.</body></html>");
+  res.setHeader("Content-Type", f.mime);
+  res.send(f.buffer);
+});
+
 app.use((req, res, next) => {
   if (!req.headers.authorization?.startsWith("Basic ")) return res.status(401).json({ description: "Authentication failed", errors: [] });
   next();
@@ -97,6 +109,18 @@ const paginate = (req, list) => {
   const per = Math.min(Number(req.query.per_page || 30), 100);
   return list.slice((page - 1) * per, page * per);
 };
+
+const agents = [
+  { id: 1, first_name: "API", last_name: "Service-User", email: "api@example.com", active: true, job_title: "Integration" },
+  { id: 7, first_name: "Michael", last_name: "Prietl", email: "michidev@example.com", active: true, job_title: "IT" },
+  { id: 8, first_name: "Anna", last_name: "Muster", email: "anna@example.com", active: true, job_title: "Service Desk" },
+  { id: 9, first_name: "Bernd", last_name: "Beispiel", email: "bernd@example.com", active: true, job_title: "Service Desk" },
+];
+app.get("/api/v2/agents", (req, res) => res.json({ agents: paginate(req, agents) }));
+// Real Freshservice ignores agent_id on articles (author = API key owner). Set MOCK_ACCEPT_AGENT_ID=1 to simulate an instance that accepts it.
+const API_USER_ID = 1;
+const acceptAgentId = process.env.MOCK_ACCEPT_AGENT_ID === "1";
+const authorFor = (body) => (acceptAgentId && body.agent_id ? Number(body.agent_id) : API_USER_ID);
 
 app.get("/api/v2/solutions/categories", (req, res) => res.json({ categories: paginate(req, categories) }));
 app.post("/api/v2/solutions/categories", (req, res) => {
@@ -134,6 +158,7 @@ app.post("/api/v2/solutions/articles", (req, res) => {
     id: nextId++, ...b, folder_id: Number(b.folder_id), status: Number(b.status || 1), article_type: Number(b.article_type || 1),
     category_id: folder?.category_id, description_text: String(b.description).replace(/<[^>]+>/g, " ").trim(),
     views: 0, thumbs_up: 0, thumbs_down: 0, created_at: now(), updated_at: now(), attachments: storeAttachments(req.files, req),
+    agent_id: authorFor(b),
   };
   articles.push(a);
   res.status(201).json({ article: a });
@@ -142,19 +167,14 @@ app.put("/api/v2/solutions/articles/:id", (req, res) => {
   const a = articles.find((x) => String(x.id) === req.params.id);
   if (!a) return res.status(404).json({ description: "Not found" });
   if (/src="data:image/i.test(req.body.description || "")) return res.status(400).json({ description: "Validation failed", errors: [{ field: "description", message: "Base64 images are not supported" }] });
-  Object.assign(a, req.body, { updated_at: now() });
+  const { agent_id: requestedAgent, ...rest } = req.body;
+  Object.assign(a, rest, { updated_at: now(), modified_by: API_USER_ID });
+  if (requestedAgent && acceptAgentId) a.agent_id = Number(requestedAgent);
   if (req.body.folder_id) a.folder_id = Number(req.body.folder_id);
   if (req.body.status) a.status = Number(req.body.status);
   if (req.body.description) a.description_text = String(req.body.description).replace(/<[^>]+>/g, " ").trim();
   a.attachments = [...(a.attachments || []), ...storeAttachments(req.files, req)];
   res.json({ article: a });
-});
-app.get("/helpdesk/attachments/:id", (req, res) => {
-  const f = attachments.get(Number(req.params.id));
-  if (!f) return res.status(404).send("not found");
-  if (!req.headers.authorization) return res.status(401).send("login required");
-  res.setHeader("Content-Type", f.mime);
-  res.send(f.buffer);
 });
 app.delete("/api/v2/solutions/articles/:id", (req, res) => {
   const i = articles.findIndex((x) => String(x.id) === req.params.id);

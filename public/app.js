@@ -4,6 +4,7 @@
 
   // ---------------------------------------------------------------- state
   const state = {
+    agents: null,              // [{id,name,email,job_title}] from Freshservice (for identity / author picker)
     settings: null,            // browser-only credentials/settings (localStorage)
     config: null,              // effective config: settings + server ENV defaults (flags only)
     categories: [],            // [{id,name,folders:[{id,name,category_id,articles:[]}]}]
@@ -25,7 +26,11 @@
   // All keys live ONLY in this browser (localStorage) and are sent per request as headers.
   // The server never persists them.
   const SETTINGS_KEY = "fkm.settings";
-  const SETTINGS_FIELDS = ["freshserviceDomain", "freshserviceApiKey", "freshserviceWorkspaceId", "openaiApiKey", "aiModel", "aiEffort"];
+  const SETTINGS_FIELDS = [
+    "freshserviceDomain", "freshserviceApiKey", "freshserviceWorkspaceId", "openaiApiKey", "aiModel", "aiEffort",
+    // identity ("who am I") – used as default article author
+    "authorAgentId", "authorName", "authorEmail", "bylineEnabled", // bylineEnabled: "" | "1" (on) | "0" (off)
+  ];
   const HEADER_NAMES = {
     freshserviceDomain: "x-fs-domain",
     freshserviceApiKey: "x-fs-key",
@@ -170,12 +175,19 @@
     return `${scheme}://${d}`;
   }
 
-  /** Freshservice attachment images need a login session; route them through the local proxy for display in the app. */
-  function displayHtml(html) {
-    const base = fsBaseUrl();
-    if (!base || !html) return html || "";
-    const re = new RegExp(base.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&") + "/helpdesk/attachments/(\\d+)", "g");
-    return html.replace(re, "/api/fs/attachment/$1");
+  /**
+   * Freshservice attachment images (…/helpdesk/attachments/<id>, any host incl. custom portal domains) need a browser
+   * session; for display in the app they are routed through the local proxy, which resolves them via the API using the
+   * article id. The original URL travels along in ?orig= so saving restores it exactly.
+   */
+  function displayHtml(html, articleId) {
+    if (!html) return "";
+    return html.replace(/https?:\/\/[^/"'\s>]+\/helpdesk\/attachments\/(\d+)(?!\d)/g, (url, attId) => {
+      const q = new URLSearchParams();
+      if (articleId) q.set("article", String(articleId));
+      q.set("orig", url);
+      return `/api/fs/attachment/${attId}?${q.toString()}`;
+    });
   }
 
   function splitList(str) {
@@ -241,6 +253,7 @@
     $("#cfg-ai-hint").textContent = src("openai");
     $("#cfg-fs-key").placeholder = env.hasFreshserviceKey ? "leer = Server-Standard verwenden" : "API-Key aus Freshservice";
     $("#cfg-ai-key").placeholder = env.hasOpenaiKey ? "leer = Server-Standard verwenden" : "sk-…";
+    updateIdentityRow();
   }
 
   function openModal(id) { $(`#${id}`).classList.remove("hidden"); }
@@ -250,8 +263,116 @@
 
   $("#btn-settings").addEventListener("click", () => { setStatus("#cfg-test-result", ""); openModal("modal-settings"); });
 
+  // ---------------------------------------------------------------- identity / author
+  async function loadAgents(force = false) {
+    if (state.agents && !force) return state.agents;
+    const data = await api("/api/fs/agents");
+    state.agents = (data.agents || []).sort((a, b) => a.name.localeCompare(b.name, "de"));
+    return state.agents;
+  }
+  function agentById(id) {
+    return (state.agents || []).find((a) => String(a.id) === String(id)) || null;
+  }
+  function agentLabel(id) {
+    const a = agentById(id);
+    return a ? a.name : id ? `Agent #${id}` : "";
+  }
+  /** Default author = the identity chosen in setup (null if not set). */
+  function currentAuthor() {
+    const s = state.settings || {};
+    return s.authorAgentId ? { agent_id: Number(s.authorAgentId), name: s.authorName || agentLabel(s.authorAgentId) } : null;
+  }
+  function bylineEnabled() {
+    return (state.settings?.bylineEnabled || "1") !== "0";
+  }
+  function authorPayload(agentId) {
+    const id = agentId !== undefined ? agentId : state.settings?.authorAgentId;
+    if (!id) return { author: null, byline: bylineEnabled() };
+    const a = agentById(id);
+    return { author: { agent_id: Number(id), name: a?.name || (String(id) === String(state.settings?.authorAgentId) ? state.settings.authorName : `Agent #${id}`) }, byline: bylineEnabled() };
+  }
+  function fillAuthorSelect(select, selectedId, { allowNone = true } = {}) {
+    const opts = [];
+    if (allowNone) opts.push('<option value="">– API-Benutzer (Standard von Freshservice) –</option>');
+    for (const a of state.agents || []) {
+      const me = String(a.id) === String(state.settings?.authorAgentId) ? " (ich)" : "";
+      opts.push(`<option value="${a.id}">${esc(a.name)}${me}${a.email ? ` – ${esc(a.email)}` : ""}</option>`);
+    }
+    select.innerHTML = opts.join("");
+    if (selectedId !== undefined && selectedId !== null && selectedId !== "") select.value = String(selectedId);
+    if (select.value !== String(selectedId ?? "") && selectedId) {
+      // author not in agent list (deactivated agent) → keep it selectable
+      select.insertAdjacentHTML("beforeend", `<option value="${esc(selectedId)}">Agent #${esc(selectedId)} (nicht in Liste)</option>`);
+      select.value = String(selectedId);
+    }
+  }
+
+  function renderIdentityList(filter = "") {
+    const q = filter.trim().toLowerCase();
+    const sel = $("#identity-select");
+    const items = (state.agents || []).filter((a) => !q || `${a.name} ${a.email}`.toLowerCase().includes(q));
+    sel.innerHTML = items.slice(0, 300).map((a) => `<option value="${a.id}">${esc(a.name)}${a.email ? ` – ${esc(a.email)}` : ""}</option>`).join("");
+    if (state.settings?.authorAgentId && items.some((a) => String(a.id) === String(state.settings.authorAgentId))) sel.value = String(state.settings.authorAgentId);
+    else if (items.length === 1) sel.value = String(items[0].id);
+    if (!items.length) sel.innerHTML = '<option disabled>Keine Treffer</option>';
+  }
+
+  /** @param {"setup"|"update"|"change"} reason */
+  async function openIdentityModal(reason = "change") {
+    $("#identity-title").textContent = reason === "change" ? "Autor / Identität ändern" : "Wer bist du?";
+    $("#identity-update-note").classList.toggle("hidden", reason !== "update");
+    $("#identity-byline").checked = bylineEnabled();
+    $("#identity-search").value = "";
+    setStatus("#identity-status", '<span class="spinner"></span>Lade Agentenliste aus Freshservice…', "info");
+    openModal("modal-identity");
+    try {
+      await loadAgents();
+      setStatus("#identity-status", "");
+      renderIdentityList();
+    } catch (e) {
+      setStatus("#identity-status", `Agentenliste konnte nicht geladen werden: ${esc(e.message)}<br><small>Der API-Key braucht Leserechte auf Agenten. Du kannst trotzdem später fortfahren.</small>`, "err");
+    }
+  }
+  $("#identity-search").addEventListener("input", (e) => renderIdentityList(e.target.value));
+  $("#identity-select").addEventListener("dblclick", () => $("#btn-identity-save").click());
+  $("#btn-identity-later").addEventListener("click", () => closeModal("modal-identity"));
+  $("#btn-identity-save").addEventListener("click", () => {
+    const id = $("#identity-select").value;
+    const a = agentById(id);
+    if (!a) return setStatus("#identity-status", "Bitte einen Agenten auswählen.", "err");
+    saveSettings({ ...state.settings, authorAgentId: String(a.id), authorName: a.name, authorEmail: a.email || "", bylineEnabled: $("#identity-byline").checked ? "1" : "0" });
+    closeModal("modal-identity");
+    updateIdentityRow();
+    toast(`Du bist jetzt „${a.name}“ – wird als Autor vorbelegt.`, "ok");
+  });
+  $("#btn-cfg-identity").addEventListener("click", () => {
+    if (!state.config?.hasFreshserviceKey) return setStatus("#cfg-test-result", "Bitte zuerst Freshservice-Zugang speichern.", "err");
+    openIdentityModal("change");
+  });
+  function updateIdentityRow() {
+    const s = state.settings || {};
+    $("#cfg-identity-name").textContent = s.authorAgentId ? `${s.authorName || "Agent #" + s.authorAgentId}${s.authorEmail ? ` (${s.authorEmail})` : ""}` : "– noch nicht festgelegt –";
+  }
+
+  /** Ask for identity once the Freshservice connection works and no identity is stored yet. */
+  function maybeAskIdentity(hadSettingsBefore) {
+    if (!state.config?.hasFreshserviceKey || !state.categories.length) return;
+    if (state.settings?.authorAgentId) return;
+    if (!$("#modal-identity").classList.contains("hidden")) return;
+    openIdentityModal(hadSettingsBefore ? "update" : "setup");
+  }
+
+  function authorResultToast(base, r) {
+    const a = r?.author;
+    if (!a) return base;
+    if (a.native === true) return `${base} – Autor: ${agentLabel(a.requested)} (nativ gesetzt)`;
+    if (a.byline) return `${base} – Freshservice behält den API-Benutzer als Autor; Zeile „Author: ${agentLabel(a.requested)}“ ergänzt`;
+    return `${base} – Hinweis: Freshservice hat den Autor nicht übernommen (API-Benutzer bleibt Autor)`;
+  }
+
   function settingsFromForm() {
     return {
+      ...(state.settings || {}), // keep identity fields etc.
       freshserviceDomain: $("#cfg-domain").value.trim(),
       freshserviceApiKey: $("#cfg-fs-key").value.trim(),
       freshserviceWorkspaceId: $("#cfg-workspace").value.trim(),
@@ -263,11 +384,15 @@
 
   $("#btn-cfg-save").addEventListener("click", async () => {
     try {
-      saveSettings(settingsFromForm()); // localStorage only — never sent to the server for storage
+      const before = settingsFromForm();
+      const credsChanged = before.freshserviceDomain !== state.settings?.freshserviceDomain || before.freshserviceApiKey !== state.settings?.freshserviceApiKey;
+      saveSettings(before); // localStorage only — never sent to the server for storage
+      if (credsChanged) state.agents = null; // different account → reload agent list
       await loadConfig();
       toast("Einstellungen in diesem Browser gespeichert", "ok");
       closeModal("modal-settings");
       await loadTree(true);
+      maybeAskIdentity(false); // first successful connection → "Wer bist du?"
     } catch (e) {
       setStatus("#cfg-test-result", esc(e.message), "err");
     }
@@ -594,7 +719,7 @@
     $("#detail-meta").innerHTML = "";
     $("#detail-tags").innerHTML = "";
     try {
-      const { article } = await api(`/api/fs/articles/${id}`);
+      const [{ article }] = await Promise.all([api(`/api/fs/articles/${id}`), loadAgents().catch(() => null)]);
       state.selectedArticle = article;
       renderDetail(article);
     } catch (e) {
@@ -612,6 +737,7 @@
       <span class="badge badge-type">${TYPE[a.article_type] || "–"}</span>
       ${folder ? `<span>📁 ${esc(folder.category?.name)} / ${esc(folder.name)}</span>` : `<span>Ordner-ID ${a.folder_id}</span>`}
       <span>ID ${a.id}</span>
+      ${a.agent_id ? `<span>✍ ${esc(agentLabel(a.agent_id))}</span>` : ""}
       <span>Erstellt: ${fmtDate(a.created_at)}</span>
       <span>Geändert: ${fmtDate(a.updated_at)}</span>
       ${a.views != null ? `<span>👁 ${a.views}</span>` : ""}
@@ -625,7 +751,7 @@
       if (!state.allLoaded) return toast("Für Tag-Filter erst „Alle Artikel laden“.", "");
       selectTag(p.dataset.tag);
     }));
-    $("#detail-body").innerHTML = sanitize(displayHtml(a.description || ""));
+    $("#detail-body").innerHTML = sanitize(displayHtml(a.description || "", a.id));
     $("#detail-html").textContent = a.description || "";
     const base = fsBaseUrl();
     const link = $("#detail-open-fs");
@@ -756,8 +882,23 @@
     } else {
       fillEditorFolders();
     }
+    // author: new article → my identity; existing article → the "Author: …" byline if present (Freshservice usually keeps
+    // the API user as agent_id, so the byline is the reliable signal), otherwise the article's agent_id
+    const authorSel = $("#ed-author");
+    const resolveEditAuthor = () => {
+      if (mode !== "edit") return state.settings?.authorAgentId || "";
+      const m = String(article?.description || "").match(/<p[^>]*>\s*<em>\s*Author:\s*([^<]+?)\s*<\/em>\s*<\/p>\s*$/i);
+      if (m) {
+        const byName = (state.agents || []).find((a) => a.name.toLowerCase() === m[1].trim().toLowerCase());
+        if (byName) return String(byName.id);
+      }
+      return article?.agent_id ?? "";
+    };
+    const wantAuthor = resolveEditAuthor();
+    authorSel.innerHTML = `<option value="${esc(wantAuthor)}">${wantAuthor ? esc(agentLabel(wantAuthor) || state.settings?.authorName || `Agent #${wantAuthor}`) : "– API-Benutzer (Standard von Freshservice) –"}</option>`;
+    loadAgents().then(() => fillAuthorSelect(authorSel, resolveEditAuthor())).catch(() => { /* keep minimal option */ });
     showView("editor");
-    setEditorHtml(displayHtml(src.description || ""));
+    setEditorHtml(displayHtml(src.description || "", article?.id));
     setTimeout(() => $("#ed-title").focus(), 50);
   }
 
@@ -781,18 +922,21 @@
       tags: splitList($("#ed-tags").value),
       keywords: splitList($("#ed-keywords").value),
       review_date: $("#ed-review").value || undefined,
+      ...authorPayload($("#ed-author").value),
     };
     const btn = $("#btn-editor-save");
     btn.disabled = true;
     setStatus("#editor-status", '<span class="spinner"></span>Speichere in Freshservice…', "info");
     try {
-      let article, images;
+      let article, images, r;
       if (state.editor.mode === "edit" && state.editor.articleId) {
-        ({ article, images } = await api(`/api/fs/articles/${state.editor.articleId}`, { method: "PUT", body: payload }));
-        toast(imagesToast("Artikel aktualisiert", images), "ok");
+        r = await api(`/api/fs/articles/${state.editor.articleId}`, { method: "PUT", body: payload });
+        ({ article, images } = r);
+        toast(authorResultToast(imagesToast("Artikel aktualisiert", images), r), "ok");
       } else {
-        ({ article, images } = await api("/api/fs/articles", { method: "POST", body: payload }));
-        toast(imagesToast("Artikel angelegt", images), "ok");
+        r = await api("/api/fs/articles", { method: "POST", body: payload });
+        ({ article, images } = r);
+        toast(authorResultToast(imagesToast("Artikel angelegt", images), r), "ok");
       }
       if (images?.unmapped?.length || images?.missing?.length) {
         toast(`Achtung: ${(images.unmapped || []).length + (images.missing || []).length} Bild(er) konnten nicht als Anhang zugeordnet werden – bitte Artikel prüfen.`, "err");
@@ -958,11 +1102,12 @@
     if (!confirm(`Artikel „${d.title}“ ${status === 2 ? "VERÖFFENTLICHT" : "als Entwurf"} in Ordner „${folder?.name || d.folder_id}“ anlegen?`)) return;
     aiSetBusy(true, "Lege Artikel in Freshservice an…");
     try {
-      const { article } = await api("/api/fs/articles", {
+      const r = await api("/api/fs/articles", {
         method: "POST",
-        body: { ...d, status, article_type: 1 },
+        body: { ...d, status, article_type: 1, ...authorPayload() },
       });
-      toast(`Artikel angelegt (ID ${article.id})`, "ok");
+      const { article } = r;
+      toast(authorResultToast(`Artikel angelegt (ID ${article.id})`, r), "ok");
       await loadFolderArticles(article.folder_id, true);
       if (state.allLoaded) buildTagCloud();
       renderTree();
@@ -989,11 +1134,14 @@
   // ---------------------------------------------------------------- init
   (async function init() {
     state.settings = loadSettings();
+    const hadSettingsBefore = Boolean(state.settings.freshserviceApiKey || state.settings.freshserviceDomain);
     registerServiceWorker(); // in background; needed only for attachment image previews
     await loadConfig();
     if (!state.config.hasFreshserviceKey || !state.config.freshserviceDomain) {
       openModal("modal-settings");
     }
     await loadTree();
+    // existing users after the author update (or ENV-configured users) → ask once who they are
+    maybeAskIdentity(hadSettingsBefore || Boolean(state.config.keySources?.freshservice === "env"));
   })();
 })();

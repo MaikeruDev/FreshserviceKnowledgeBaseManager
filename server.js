@@ -51,17 +51,37 @@ setInterval(() => {
 }, 60 * 60 * 1000).unref();
 
 const TEMP_IMG_RE = /(?:https?:\/\/[^/"'\s>]+)?\/api\/uploads\/([0-9a-f-]{36})/g;
-const PROXY_IMG_RE = /(?:https?:\/\/[^/"'\s>]+)?\/api\/fs\/attachment\/(\d+)/g;
+// proxy URL as used for display in the app: /api/fs/attachment/<id>?article=<articleId>&orig=<encoded canonical url>
+const PROXY_IMG_RE = /(?:https?:\/\/[^/"'\s>]+)?\/api\/fs\/attachment\/(\d+)(?:\?([^"'\s>]*))?/g;
+
+/** Restore the Freshservice URL from a proxy URL (prefers the original canonical_url carried in ?orig=). */
+function proxyToCanonical(client, attId, query) {
+  if (query) {
+    const orig = new URLSearchParams(query.replace(/&amp;/g, "&")).get("orig");
+    if (orig && /^https?:\/\/[^/]+\/helpdesk\/attachments\/\d+/.test(orig)) return orig;
+  }
+  return `${client.baseUrl}/helpdesk/attachments/${attId}`;
+}
+
+// ---- author byline (fallback when Freshservice ignores agent_id) ------------
+const BYLINE_RE = /\s*<p[^>]*>\s*<em>\s*Author:\s*[^<]*<\/em>\s*<\/p>\s*$/i;
+function withByline(html, name) {
+  const base = String(html || "").replace(BYLINE_RE, "");
+  return `${base}\n<p><em>Author: ${name.replace(/[<>&]/g, "")}</em></p>`;
+}
 
 /**
- * Create or update an article. If the description references temporary uploads
- * (/api/uploads/<id>), they are sent as attachments[] via multipart, and the
- * <img src> is rewritten to the attachment's canonical_url afterwards.
+ * Create or update an article.
+ * - author: { agent_id, name } → agent_id is attempted natively (undocumented in the Freshservice API; works only if the
+ *   instance accepts it). If Freshservice keeps the API-key owner as author and `byline` is true, an "Author: …" line
+ *   is appended to the article instead.
+ * - images: temporary uploads (/api/uploads/<id>) are sent as attachments[] via multipart and <img src> is rewritten
+ *   to the attachment's canonical_url afterwards.
  */
-async function saveArticle(client, data, id) {
+async function saveArticle(client, data, id, { author, byline = true } = {}) {
   // proxy URLs the editor used for display → stable Freshservice URLs
   if (typeof data.description === "string") {
-    data.description = data.description.replace(PROXY_IMG_RE, (m, attId) => `${client.baseUrl}/helpdesk/attachments/${attId}`);
+    data.description = data.description.replace(PROXY_IMG_RE, (m, attId, query) => proxyToCanonical(client, attId, query));
   }
   const ids = [...new Set([...(data.description || "").matchAll(TEMP_IMG_RE)].map((m) => m[1]))];
   const files = ids
@@ -70,26 +90,60 @@ async function saveArticle(client, data, id) {
     .map((f) => ({ ...f, uploadName: `img-${f.uid.slice(0, 8)}-${f.filename}` }));
   const missingUploads = ids.filter((uid) => !uploads.has(uid));
 
-  if (!files.length) {
-    const article = id ? await client.updateArticle(id, data) : await client.createArticle(data);
-    return { article, images: { attached: 0, missing: missingUploads } };
+  const wantAgentId = author?.agent_id ? Number(author.agent_id) : null;
+  const save = async (payload) =>
+    files.length ? client.saveArticleWithAttachments(payload, files, id) : id ? client.updateArticle(id, payload) : client.createArticle(payload);
+
+  let article;
+  let agentIdRejected = false;
+  try {
+    article = await save(wantAgentId ? { ...data, agent_id: wantAgentId } : data);
+  } catch (e) {
+    // instance rejects the undocumented field → retry without it
+    if (wantAgentId && e instanceof FreshserviceError && e.status === 400 && /agent_id/i.test(e.message)) {
+      agentIdRejected = true;
+      article = await save(data);
+    } else {
+      throw e;
+    }
   }
 
-  let article = await client.saveArticleWithAttachments(data, files, id);
-  const byName = new Map((article.attachments || []).map((a) => [a.name, a]));
+  // native author applied? (only decidable when Freshservice returns agent_id)
+  const nativeAuthor = wantAgentId ? Number(article.agent_id) === wantAgentId : null;
+
+  // post-processing of the description: image URLs + byline fallback
   let description = data.description;
   const unmapped = [];
-  for (const f of files) {
-    const att = byName.get(f.uploadName);
-    const url = att?.canonical_url || att?.attachment_url;
-    if (!url) { unmapped.push(f.uploadName); continue; }
-    description = description.replace(new RegExp(`(?:https?:\\/\\/[^/"'\\s>]+)?\\/api\\/uploads\\/${f.uid}`, "g"), url);
+  if (files.length) {
+    const byName = new Map((article.attachments || []).map((a) => [a.name, a]));
+    for (const f of files) {
+      const att = byName.get(f.uploadName);
+      const url = att?.canonical_url || att?.attachment_url;
+      if (!url) { unmapped.push(f.uploadName); continue; }
+      description = description.replace(new RegExp(`(?:https?:\\/\\/[^/"'\\s>]+)?\\/api\\/uploads\\/${f.uid}`, "g"), url);
+    }
   }
-  if (description !== data.description) {
+  let bylineUsed = false;
+  if (wantAgentId && nativeAuthor === false && byline && author.name) {
+    description = withByline(description, author.name);
+    bylineUsed = true;
+  } else if (wantAgentId && nativeAuthor === true && author.name && BYLINE_RE.test(description || "")) {
+    // native author works → a byline naming the same person is redundant; other bylines are left untouched
+    const m = description.match(BYLINE_RE);
+    if (m && new RegExp(`Author:\\s*${author.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*<`, "i").test(m[0])) {
+      description = description.replace(BYLINE_RE, "");
+    }
+  }
+  if (typeof description === "string" && description !== data.description) {
     article = await client.updateArticle(article.id, { description });
   }
   for (const f of files) uploads.delete(f.uid);
-  return { article, images: { attached: files.length - unmapped.length, unmapped, missing: missingUploads } };
+
+  return {
+    article,
+    images: { attached: files.length - unmapped.length, unmapped, missing: missingUploads },
+    author: wantAgentId ? { requested: wantAgentId, native: nativeAuthor, rejected: agentIdRejected, byline: bylineUsed, actual_agent_id: article.agent_id ?? null } : null,
+  };
 }
 
 // ---- config ----------------------------------------------------------------
@@ -163,15 +217,34 @@ app.post("/api/fs/articles", wrap(async (req, res) => {
   if (!data.title || !data.description || !data.folder_id) {
     return res.status(400).json({ error: "title, description und folder_id sind Pflichtfelder." });
   }
-  const { article, images } = await saveArticle(fsClient(req), data);
+  const result = await saveArticle(fsClient(req), data, undefined, authorOptions(req.body));
   invalidateOverview(req);
-  res.status(201).json({ article, images });
+  res.status(201).json(result);
 }));
 
 app.put("/api/fs/articles/:id", wrap(async (req, res) => {
-  const { article, images } = await saveArticle(fsClient(req), pickArticleFields(req.body || {}), req.params.id);
+  const result = await saveArticle(fsClient(req), pickArticleFields(req.body || {}), req.params.id, authorOptions(req.body));
   invalidateOverview(req);
-  res.json({ article, images });
+  res.json(result);
+}));
+
+/** body.author = { agent_id, name }, body.byline = boolean (default true) */
+function authorOptions(body) {
+  const a = body?.author;
+  const author = a && a.agent_id ? { agent_id: Number(a.agent_id), name: String(a.name || "").trim() } : null;
+  return { author, byline: body?.byline !== false };
+}
+
+app.get("/api/fs/agents", wrap(async (req, res) => {
+  const agents = await fsClient(req).agents();
+  res.json({
+    agents: agents.map((a) => ({
+      id: a.id,
+      name: [a.first_name, a.last_name].filter(Boolean).join(" ") || a.email,
+      email: a.email,
+      job_title: a.job_title || "",
+    })),
+  });
 }));
 
 // ---- images -----------------------------------------------------------------
@@ -199,14 +272,45 @@ app.get("/api/uploads/:id", (req, res) => {
   res.send(u.buffer);
 });
 
-/** Proxy for Freshservice attachment images so they render inside the app (browser has no Freshservice session cookies here). */
+/**
+ * Proxy for Freshservice attachment images so they render inside the app (browser has no Freshservice session cookies).
+ * The helpdesk route (/helpdesk/attachments/<id>) only works with a browser session, NOT with API-key auth — it returns
+ * the login page. So we resolve the attachment through the API: GET /solutions/articles/<article> → attachments[] →
+ * attachment_url (short-lived signed storage URL) and stream that. ?article=<id> is required for this path;
+ * without it we fall back to the helpdesk URL (works only if the instance accepts API-key auth there).
+ */
 app.get("/api/fs/attachment/:id", wrap(async (req, res) => {
   if (!/^\d+$/.test(req.params.id)) return res.status(400).send("bad id");
-  const upstream = await fsClient(req).fetchAttachment(req.params.id);
-  if (!upstream.ok) return res.status(502).send(`Freshservice-Anhang nicht ladbar (${upstream.status})`);
-  res.setHeader("Content-Type", upstream.headers.get("content-type") || "application/octet-stream");
-  res.setHeader("Cache-Control", "private, max-age=3600");
-  res.send(Buffer.from(await upstream.arrayBuffer()));
+  const client = fsClient(req);
+  const attId = Number(req.params.id);
+  const articleId = /^\d+$/.test(String(req.query.article || "")) ? Number(req.query.article) : null;
+
+  const sendUpstream = async (upstream) => {
+    const ct = upstream.headers.get("content-type") || "application/octet-stream";
+    if (!upstream.ok || /text\/html/i.test(ct)) return false; // login page / error → not an image
+    res.setHeader("Content-Type", ct);
+    res.setHeader("Cache-Control", "private, max-age=900");
+    res.send(Buffer.from(await upstream.arrayBuffer()));
+    return true;
+  };
+
+  if (articleId) {
+    try {
+      const article = await client.article(articleId);
+      const att = (article.attachments || []).find((a) => Number(a.id) === attId);
+      if (att?.attachment_url) {
+        // signed storage URL → no auth needed (sending the Basic header to S3 would even break the signature)
+        if (await sendUpstream(await fetch(att.attachment_url, { redirect: "follow" }))) return;
+      }
+    } catch (e) {
+      if (!(e instanceof FreshserviceError)) throw e; // article not found/no access → try fallback below
+    }
+  }
+  // fallback: helpdesk route with API-key auth (returns the login page on most instances)
+  if (await sendUpstream(await client.fetchAttachment(attId))) return;
+  res.status(502).send(articleId
+    ? `Freshservice-Anhang ${attId} nicht ladbar (nicht an Artikel ${articleId} gefunden oder kein Zugriff).`
+    : `Freshservice-Anhang ${attId} nicht ladbar: Helpdesk-Route verlangt Browser-Login; Artikel-ID fehlt für den API-Weg (?article=…).`);
 }));
 
 app.delete("/api/fs/articles/:id", wrap(async (req, res) => {
