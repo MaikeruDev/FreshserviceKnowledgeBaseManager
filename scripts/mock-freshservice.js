@@ -35,12 +35,15 @@ app.use(async (req, res, next) => {
   }
 });
 
+// MOCK_RENAME_ATTACHMENTS=1 simulates an instance that rewrites attachment file names (name matching then fails)
+const renameAttachments = process.env.MOCK_RENAME_ATTACHMENTS === "1";
 function storeAttachments(files, req) {
   return (files || []).map((f) => {
     const id = nextAttachmentId++;
     attachments.set(id, f);
+    const name = renameAttachments ? `file_${id}${(f.name.match(/\.[a-z0-9]+$/i) || [""])[0]}` : f.name;
     return {
-      id, name: f.name, content_type: f.mime, file_size: f.buffer.length, created_at: now(), updated_at: now(),
+      id, name, content_type: f.mime, file_size: f.buffer.length, created_at: now(), updated_at: now(),
       attachment_url: `http://${req.headers.host}/helpdesk/attachments/${id}?signed=1`,
       canonical_url: `http://${req.headers.host}/helpdesk/attachments/${id}`,
     };
@@ -121,6 +124,14 @@ app.get("/api/v2/agents", (req, res) => res.json({ agents: paginate(req, agents)
 const API_USER_ID = 1;
 const acceptAgentId = process.env.MOCK_ACCEPT_AGENT_ID === "1";
 const authorFor = (body) => (acceptAgentId && body.agent_id ? Number(body.agent_id) : API_USER_ID);
+
+// documented download endpoint (API-key auth) — real Freshservice redirects to signed storage; we serve directly
+app.get("/api/v2/attachments/:id", (req, res) => {
+  const f = attachments.get(Number(req.params.id));
+  if (!f) return res.status(404).json({ description: "Not found" });
+  res.setHeader("Content-Type", f.mime);
+  res.send(f.buffer);
+});
 
 app.get("/api/v2/solutions/categories", (req, res) => res.json({ categories: paginate(req, categories) }));
 app.post("/api/v2/solutions/categories", (req, res) => {

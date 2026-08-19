@@ -117,7 +117,7 @@
     el.textContent = msg;
     el.className = `toast ${kind}`;
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => el.classList.add("hidden"), kind === "err" ? 7000 : 3500);
+    toastTimer = setTimeout(() => el.classList.add("hidden"), kind === "err" ? 12000 : 4500);
   }
 
   function setStatus(el, msg, kind = "info") {
@@ -925,7 +925,10 @@
         toast(authorResultToast(imagesToast("Artikel angelegt", images), r), "ok");
       }
       if (images?.unmapped?.length || images?.missing?.length) {
-        toast(`Achtung: ${(images.unmapped || []).length + (images.missing || []).length} Bild(er) konnten nicht als Anhang zugeordnet werden – bitte Artikel prüfen.`, "err");
+        const parts = [];
+        if (images.unmapped?.length) parts.push(`${images.unmapped.length} Bild(er) konnten nicht zu Freshservice übertragen werden (${images.unmapped.join(", ")}) – in Freshservice fehlt das Bild; bitte Artikel erneut speichern, der Upload wird wiederholt.`);
+        if (images.missing?.length) parts.push(`${images.missing.length} Bild(er) sind auf dem Server nicht mehr vorhanden (z. B. nach Neustart) – bitte das Bild im Editor erneut einfügen und speichern.`);
+        toast("Achtung: " + parts.join(" "), "err");
       }
       // refresh folder cache & show
       await loadFolderArticles(article.folder_id, true);

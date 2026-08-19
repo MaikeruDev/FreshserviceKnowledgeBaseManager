@@ -1,5 +1,6 @@
 import express from "express";
 import crypto from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { credsFromRequest, publicConfig } from "./lib/config.js";
@@ -43,13 +44,42 @@ function invalidateOverview(req) {
 // ---- image uploads (temporary, until the article is saved) ------------------
 // Freshservice rejects base64 images in article HTML, so images are held here,
 // attached to the article as attachments[] on save and referenced via canonical_url.
-const uploads = new Map(); // id -> { buffer, mime, filename, createdAt }
+// Stored on disk (data/uploads) so they survive server restarts/deploys while an editor is still open.
+const UPLOAD_DIR = path.join(__dirname, "data", "uploads");
 const UPLOAD_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
-setInterval(() => {
-  const cutoff = Date.now() - UPLOAD_TTL_MS;
-  for (const [id, u] of uploads) if (u.createdAt < cutoff) uploads.delete(id);
-}, 60 * 60 * 1000).unref();
+const uploads = {
+  _meta(id) { return path.join(UPLOAD_DIR, `${id}.json`); },
+  _bin(id) { return path.join(UPLOAD_DIR, `${id}.bin`); },
+  set(id, { buffer, mime, filename, createdAt }) {
+    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+    fs.writeFileSync(this._bin(id), buffer);
+    fs.writeFileSync(this._meta(id), JSON.stringify({ mime, filename, createdAt, size: buffer.length }));
+  },
+  has(id) { return fs.existsSync(this._meta(id)) && fs.existsSync(this._bin(id)); },
+  get(id) {
+    try {
+      const meta = JSON.parse(fs.readFileSync(this._meta(id), "utf8"));
+      return { ...meta, buffer: fs.readFileSync(this._bin(id)) };
+    } catch { return undefined; }
+  },
+  delete(id) {
+    for (const p of [this._meta(id), this._bin(id)]) { try { fs.unlinkSync(p); } catch { /* ignore */ } }
+  },
+  purge() {
+    try {
+      const cutoff = Date.now() - UPLOAD_TTL_MS;
+      for (const f of fs.readdirSync(UPLOAD_DIR)) {
+        if (!f.endsWith(".json")) continue;
+        const id = f.slice(0, -5);
+        const meta = JSON.parse(fs.readFileSync(path.join(UPLOAD_DIR, f), "utf8"));
+        if ((meta.createdAt || 0) < cutoff) this.delete(id);
+      }
+    } catch { /* dir may not exist yet */ }
+  },
+};
+uploads.purge();
+setInterval(() => uploads.purge(), 60 * 60 * 1000).unref();
 
 const TEMP_IMG_RE = /(?:https?:\/\/[^/"'\s>]+)?\/api\/uploads\/([0-9a-f-]{36})/g;
 // proxy URL as used for display in the app: /api/fs/attachment/<id>?article=<articleId>&orig=<encoded canonical url>
@@ -62,6 +92,36 @@ function proxyToCanonical(client, attId, query) {
     if (orig && /^https?:\/\/[^/]+\/helpdesk\/attachments\/\d+/.test(orig)) return orig;
   }
   return `${client.baseUrl}/helpdesk/attachments/${attId}`;
+}
+
+/**
+ * Map uploaded files to the attachments Freshservice returned.
+ * Only attachments that did not exist before the save are candidates. Strategy: exact name → (size, content_type)
+ * when unique → positional order when counts match. Returns Map(uid → attachment).
+ */
+function matchAttachments(files, attachments, beforeIds) {
+  const mapping = new Map();
+  const candidates = (attachments || []).filter((a) => !beforeIds.has(Number(a.id)));
+  const used = new Set();
+  const take = (f, a) => { mapping.set(f.uid, a); used.add(a.id); };
+
+  // 1) exact name (Freshservice may also lowercase/strip characters → compare normalized too)
+  const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9.]+/g, "");
+  for (const f of files) {
+    const a = candidates.find((c) => !used.has(c.id) && (c.name === f.uploadName || norm(c.name) === norm(f.uploadName)));
+    if (a) take(f, a);
+  }
+  // 2) unique size + content type
+  for (const f of files) {
+    if (mapping.has(f.uid)) continue;
+    const hits = candidates.filter((c) => !used.has(c.id) && Number(c.file_size ?? c.size) === f.buffer.length && (!c.content_type || !f.mime || c.content_type === f.mime));
+    if (hits.length === 1) take(f, hits[0]);
+  }
+  // 3) positional, only when the remaining counts match exactly
+  const restFiles = files.filter((f) => !mapping.has(f.uid));
+  const restAtts = candidates.filter((c) => !used.has(c.id));
+  if (restFiles.length && restFiles.length === restAtts.length) restFiles.forEach((f, i) => take(f, restAtts[i]));
+  return mapping;
 }
 
 // ---- author byline (fallback when Freshservice ignores agent_id) ------------
@@ -91,6 +151,12 @@ async function saveArticle(client, data, id, { author, byline = true } = {}) {
     .map((f) => ({ ...f, uploadName: `img-${f.uid.slice(0, 8)}-${f.filename}` }));
   const missingUploads = ids.filter((uid) => !uploads.has(uid));
 
+  // attachments that exist before this save (update) → lets us identify the NEW ones by difference afterwards
+  let beforeIds = new Set();
+  if (id && files.length) {
+    try { beforeIds = new Set(((await client.article(id)).attachments || []).map((a) => Number(a.id))); } catch { /* best effort */ }
+  }
+
   const wantAgentId = author?.agent_id ? Number(author.agent_id) : null;
   const save = async (payload) =>
     files.length ? client.saveArticleWithAttachments(payload, files, id) : id ? client.updateArticle(id, payload) : client.createArticle(payload);
@@ -115,13 +181,36 @@ async function saveArticle(client, data, id, { author, byline = true } = {}) {
   // post-processing of the description: image URLs + byline fallback
   let description = data.description;
   const unmapped = [];
+  const replaceTemp = (uid, url) => {
+    description = description.replace(new RegExp(`(?:https?:\\/\\/[^/"'\\s>]+)?\\/api\\/uploads\\/${uid}`, "g"), url);
+  };
   if (files.length) {
-    const byName = new Map((article.attachments || []).map((a) => [a.name, a]));
+    // the save response sometimes lacks (fresh) attachments → re-read the article to be sure
+    let atts = article.attachments;
+    if (!Array.isArray(atts) || atts.filter((a) => !beforeIds.has(Number(a.id))).length < files.length) {
+      try { atts = (await client.article(article.id)).attachments || atts || []; } catch { atts = atts || []; }
+    }
+    let mapping = matchAttachments(files, atts, beforeIds);
+
+    // anything still unmatched: upload one file at a time — then the single new attachment is unambiguous
     for (const f of files) {
-      const att = byName.get(f.uploadName);
+      if (mapping.has(f.uid)) continue;
+      try {
+        const known = new Set([...beforeIds, ...atts.map((a) => Number(a.id))]);
+        const updated = await client.saveArticleWithAttachments({}, [f], article.id);
+        let after = updated.attachments;
+        if (!Array.isArray(after)) after = (await client.article(article.id)).attachments || [];
+        const fresh = after.filter((a) => !known.has(Number(a.id)));
+        const att = fresh.find((a) => a.name === f.uploadName) || (fresh.length === 1 ? fresh[0] : null);
+        if (att) { mapping.set(f.uid, att); atts = after; }
+      } catch { /* reported as unmapped below */ }
+    }
+
+    for (const f of files) {
+      const att = mapping.get(f.uid);
       const url = att?.canonical_url || att?.attachment_url;
-      if (!url) { unmapped.push(f.uploadName); continue; }
-      description = description.replace(new RegExp(`(?:https?:\\/\\/[^/"'\\s>]+)?\\/api\\/uploads\\/${f.uid}`, "g"), url);
+      if (!url) { unmapped.push(f.filename || f.uploadName); continue; }
+      replaceTemp(f.uid, url);
     }
   }
   let bylineUsed = false;
@@ -138,7 +227,9 @@ async function saveArticle(client, data, id, { author, byline = true } = {}) {
   if (typeof description === "string" && description !== data.description) {
     article = await client.updateArticle(article.id, { description });
   }
-  for (const f of files) uploads.delete(f.uid);
+  // only drop temp uploads that made it into Freshservice; unmapped ones stay so a re-save can retry
+  const unmappedNames = new Set(unmapped);
+  for (const f of files) if (!unmappedNames.has(f.filename || f.uploadName)) uploads.delete(f.uid);
 
   return {
     article,
@@ -295,19 +386,23 @@ app.get("/api/fs/attachment/:id", wrap(async (req, res) => {
     return true;
   };
 
+  // 1) documented download endpoint: GET /api/v2/attachments/<id> (API-key auth, redirects to storage)
+  try {
+    if (await sendUpstream(await client.fetchAttachmentApi(attId))) return;
+  } catch { /* network error → try next */ }
+  // 2) via the article: attachments[].attachment_url (signed storage URL, no auth needed)
   if (articleId) {
     try {
       const article = await client.article(articleId);
       const att = (article.attachments || []).find((a) => Number(a.id) === attId);
       if (att?.attachment_url) {
-        // signed storage URL → no auth needed (sending the Basic header to S3 would even break the signature)
         if (await sendUpstream(await fetch(att.attachment_url, { redirect: "follow" }))) return;
       }
     } catch (e) {
       if (!(e instanceof FreshserviceError)) throw e; // article not found/no access → try fallback below
     }
   }
-  // fallback: helpdesk route with API-key auth (returns the login page on most instances)
+  // 3) helpdesk web route (returns the login page on most instances)
   if (await sendUpstream(await client.fetchAttachment(attId))) return;
   res.status(502).send(articleId
     ? `Freshservice-Anhang ${attId} nicht ladbar (nicht an Artikel ${articleId} gefunden oder kein Zugriff).`
