@@ -123,6 +123,16 @@ app.get("/api/v2/agents", (req, res) => res.json({ agents: paginate(req, agents)
 // Real Freshservice ignores agent_id on articles (author = API key owner). Set MOCK_ACCEPT_AGENT_ID=1 to simulate an instance that accepts it.
 const API_USER_ID = 1;
 const acceptAgentId = process.env.MOCK_ACCEPT_AGENT_ID === "1";
+// MOCK_REJECT_AGENT_ID=1 simulates instances that hard-reject the field (like real Freshservice JSON create):
+// {"description":"Validation failed","errors":[{"field":"agent_id","message":"Unexpected/invalid field in request","code":"invalid_field"}]}
+const rejectAgentId = process.env.MOCK_REJECT_AGENT_ID === "1";
+const agentIdRejection = (req, res) => {
+  if (rejectAgentId && req.body.agent_id !== undefined) {
+    res.status(400).json({ description: "Validation failed", errors: [{ field: "agent_id", message: "Unexpected/invalid field in request", code: "invalid_field" }] });
+    return true;
+  }
+  return false;
+};
 const authorFor = (body) => (acceptAgentId && body.agent_id ? Number(body.agent_id) : API_USER_ID);
 
 // documented download endpoint (API-key auth) — real Freshservice redirects to signed storage; we serve directly
@@ -161,6 +171,7 @@ app.get("/api/v2/solutions/articles/:id", (req, res) => {
   return a ? res.json({ article: a }) : res.status(404).json({ description: "Not found" });
 });
 app.post("/api/v2/solutions/articles", (req, res) => {
+  if (agentIdRejection(req, res)) return;
   const b = req.body;
   if (!b.title || !b.description || !b.folder_id) return res.status(400).json({ description: "Validation failed", errors: [{ field: "title", message: "required" }] });
   if (/src="data:image/i.test(b.description)) return res.status(400).json({ description: "Validation failed", errors: [{ field: "description", message: "Base64 images are not supported" }] });
@@ -175,6 +186,7 @@ app.post("/api/v2/solutions/articles", (req, res) => {
   res.status(201).json({ article: a });
 });
 app.put("/api/v2/solutions/articles/:id", (req, res) => {
+  if (agentIdRejection(req, res)) return;
   const a = articles.find((x) => String(x.id) === req.params.id);
   if (!a) return res.status(404).json({ description: "Not found" });
   if (/src="data:image/i.test(req.body.description || "")) return res.status(400).json({ description: "Validation failed", errors: [{ field: "description", message: "Base64 images are not supported" }] });

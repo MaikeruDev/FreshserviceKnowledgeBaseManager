@@ -158,8 +158,12 @@ async function saveArticle(client, data, id, { author, byline = true } = {}) {
   }
 
   const wantAgentId = author?.agent_id ? Number(author.agent_id) : null;
+  // Multipart whenever an author is requested: Freshservice's strict JSON validator rejects the undocumented
+  // agent_id field ("invalid_field"), while the multipart endpoint accepts it on instances where it works at all.
   const save = async (payload) =>
-    files.length ? client.saveArticleWithAttachments(payload, files, id) : id ? client.updateArticle(id, payload) : client.createArticle(payload);
+    files.length || payload.agent_id !== undefined
+      ? client.saveArticleWithAttachments(payload, files, id)
+      : id ? client.updateArticle(id, payload) : client.createArticle(payload);
 
   let article;
   let agentIdRejected = false;
@@ -167,7 +171,11 @@ async function saveArticle(client, data, id, { author, byline = true } = {}) {
     article = await save(wantAgentId ? { ...data, agent_id: wantAgentId } : data);
   } catch (e) {
     // instance rejects the undocumented field → retry without it
-    if (wantAgentId && e instanceof FreshserviceError && e.status === 400 && /agent_id/i.test(e.message)) {
+    // (the field name may only appear in the errors[] array, not in the description text)
+    const rejectsAgentId =
+      /agent_id/i.test(e.message || "") ||
+      (Array.isArray(e.body?.errors) && e.body.errors.some((x) => /agent_id/i.test(x.field || "")));
+    if (wantAgentId && e instanceof FreshserviceError && e.status === 400 && rejectsAgentId) {
       agentIdRejected = true;
       article = await save(data);
     } else {
