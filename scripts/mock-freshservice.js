@@ -120,6 +120,8 @@ const agents = [
   { id: 9, first_name: "Bernd", last_name: "Beispiel", email: "bernd@example.com", active: true, job_title: "Service Desk" },
 ];
 app.get("/api/v2/agents", (req, res) => res.json({ agents: paginate(req, agents) }));
+// undocumented whoami endpoint — the agent owning the API key (mock: the fixed API user)
+app.get("/api/v2/agents/me", (req, res) => res.json({ agent: { id: 1, first_name: "API", last_name: "ServiceUser", email: "api@example.com", active: true } }));
 // Real Freshservice ignores agent_id on articles (author = API key owner). Set MOCK_ACCEPT_AGENT_ID=1 to simulate an instance that accepts it.
 const API_USER_ID = 1;
 const acceptAgentId = process.env.MOCK_ACCEPT_AGENT_ID === "1";

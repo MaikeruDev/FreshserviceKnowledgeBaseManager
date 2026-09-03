@@ -405,6 +405,13 @@
       parts.push(r.freshservice?.ok
         ? `<div class="msg msg-ok">Freshservice OK – ${r.freshservice.categories} Kategorien unter ${esc(r.freshservice.baseUrl)}</div>`
         : `<div class="msg msg-err">Freshservice: ${esc(r.freshservice?.error)}</div>`);
+      const owner = r.freshservice?.keyOwner;
+      if (owner) {
+        const mismatch = state.settings?.authorAgentId && Number(state.settings.authorAgentId) !== Number(owner.id);
+        parts.push(mismatch
+          ? `<div class="msg msg-err">API-Key gehört zu <b>${esc(owner.name)}</b> – Freshservice trägt IMMER den Key-Besitzer als Autor ein. Du bist als „${esc(state.settings.authorName || "?")}" angemeldet: nutze deinen persönlichen API-Key (Freshservice → Profil), damit du nativ als Autor erscheinst.</div>`
+          : `<div class="msg msg-ok">API-Key gehört zu ${esc(owner.name)} – neue Artikel bekommen diesen Autor.</div>`);
+      }
       parts.push(r.openai?.ok
         ? `<div class="msg msg-ok">OpenAI OK – Modell ${esc(r.openai.model)}</div>`
         : `<div class="msg msg-err">OpenAI: ${esc(r.openai?.error)}</div>`);

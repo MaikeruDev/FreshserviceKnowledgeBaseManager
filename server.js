@@ -269,7 +269,11 @@ app.post("/api/config/test", wrap(async (req, res) => {
   try {
     const client = fsClient(req);
     const cats = await client.categories();
-    out.freshservice = { ok: true, categories: cats.length, baseUrl: client.baseUrl };
+    const me = await client.me();
+    out.freshservice = {
+      ok: true, categories: cats.length, baseUrl: client.baseUrl,
+      keyOwner: me ? { id: me.id, name: [me.first_name, me.last_name].filter(Boolean).join(" "), email: me.email || "" } : null,
+    };
   } catch (e) {
     out.freshservice = { ok: false, error: e.message };
   }
