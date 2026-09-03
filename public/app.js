@@ -431,9 +431,14 @@
         ? `<div class="msg msg-ok"><b>Autor lässt sich per API setzen ✓</b> — der Fix greift auf dieser Instanz.</div>`
         : `<div class="msg msg-err"><b>Autor lässt sich per API NICHT setzen ✗</b> — Freshservice behält den API-Key-Besitzer (Agent #${esc(r.ownerAgentId)}) als Autor.</div>`;
       const rows = (r.steps || []).map((s) => {
-        const status = s.ok ? (s.applied === true ? "✓ gesetzt" : s.applied === false ? "· keine Änderung" : "· ok") : `✗ Fehler${s.status ? " " + s.status : ""}`;
-        const detail = s.error ? ` – ${esc(s.error)}` : (s.returnedAgentId !== undefined ? ` (agent_id=${esc(s.returnedAgentId)})` : "");
-        return `<div class="small" style="font-family:monospace">${esc(s.label)}: ${status}${detail}</div>`;
+        const state = s.applied === true ? "✓ GESETZT" : !s.ok ? `✗ Fehler${s.status ? " " + s.status : ""}` : s.status ? `HTTP ${s.status}` : (s.applied === false ? "· keine Änderung" : "· ok");
+        const bits = [];
+        if (s.error) bits.push(esc(s.error));
+        if (s.rejected) bits.push("code=" + esc(s.rejected));
+        if (s.isLoginPage) bits.push("Login-Seite (Session nötig)");
+        if (s.internalAgentIdAfter !== undefined) bits.push("internal agent_id=" + esc(s.internalAgentIdAfter));
+        if (s.agentIdField !== undefined) bits.push("agent_id-Feld: " + esc(s.agentIdField));
+        return `<div class="small" style="font-family:monospace">${esc(s.label)}: ${state}${bits.length ? " – " + bits.join(", ") : ""}</div>`;
       }).join("");
       $("#cfg-test-result").innerHTML = head + `<details style="margin-top:6px"><summary class="small muted">Details (${(r.steps || []).length} Schritte) – zum Kopieren</summary><div style="margin-top:4px">${rows}</div><pre class="small" style="white-space:pre-wrap;margin-top:6px">${esc(JSON.stringify(r, null, 2))}</pre></details>`;
     } catch (e) {

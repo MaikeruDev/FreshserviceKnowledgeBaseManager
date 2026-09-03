@@ -407,9 +407,54 @@ app.post("/api/fs/author-probe", wrap(async (req, res) => {
     // Strategy C: capture the exact create-with-agent_id error (confirms whether create rejects the field)
     await record("POST create { agent_id } (JSON) — expected to fail", async () => {
       const a = await client.createArticle({ title: `__author-probe-c ${Date.now() % 100000}`, description: "<p>probe</p>", folder_id: folderId, status: 1, agent_id: agentId });
-      // if it somehow succeeds, clean it up too
       try { await client.deleteArticle(a.id); } catch { /* ignore */ }
       return { createdAgentId: a.agent_id ?? null, applied: Number(a.agent_id) === agentId };
+    });
+
+    // ---- raw sweep: alternate field names, nested shapes, and the INTERNAL (/api/_/) endpoints the web UI uses ----
+    const rawFetch = async (method, apiPath, body) => {
+      const url = new URL(apiPath, client.baseUrl);
+      if (client.workspaceId && !url.searchParams.has("workspace_id")) url.searchParams.set("workspace_id", client.workspaceId);
+      const headers = { Authorization: client.authHeader, Accept: "application/json" };
+      if (body !== undefined) headers["Content-Type"] = "application/json";
+      const r = await fetch(url, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, redirect: "manual" });
+      const text = await r.text();
+      let parsed = null; try { parsed = text ? JSON.parse(text) : null; } catch { parsed = { raw: text.slice(0, 160) }; }
+      return { status: r.status, ok: r.ok, contentType: r.headers.get("content-type") || "", body: parsed };
+    };
+    // read the author back via the internal GET (the public API returns agent_id=null on this instance)
+    const readInternalAgent = async () => {
+      try { const g = await rawFetch("GET", `/api/_/solutions/articles/${draftId}`); return g.body?.agent_id ?? g.body?.article?.agent_id ?? null; }
+      catch { return null; }
+    };
+
+    // D: alternate writable field names via the documented v2 endpoint
+    for (const field of ["user_id", "author_id", "owner_id", "created_by", "created_by_id"]) {
+      await record(`v2 PUT { ${field} }`, async () => {
+        const r = await rawFetch("PUT", `/api/v2/solutions/articles/${draftId}`, { [field]: agentId });
+        return { status: r.status, rejected: r.body?.errors?.[0]?.code || null, echoed: r.body?.article?.[field] ?? r.body?.[field] ?? null };
+      });
+    }
+    // E: nested payload shapes
+    for (const [label, payload] of [["v2 PUT { article:{agent_id} }", { article: { agent_id: agentId } }], ["v2 PUT { solution_article:{user_id} }", { solution_article: { user_id: agentId } }]]) {
+      await record(label, async () => { const r = await rawFetch("PUT", `/api/v2/solutions/articles/${draftId}`, payload); return { status: r.status, rejected: r.body?.errors?.[0]?.code || null }; });
+    }
+    // F: the INTERNAL endpoint the web UI's "Change Author" uses (may need a browser session, not an API key)
+    await record("internal PUT /api/_/solutions/articles/:id { agent_id }", async () => {
+      const r = await rawFetch("PUT", `/api/_/solutions/articles/${draftId}`, { agent_id: agentId });
+      const back = await readInternalAgent();
+      return { status: r.status, isLoginPage: /text\/html/i.test(r.contentType), internalAgentIdAfter: back, applied: Number(back) === agentId };
+    });
+    // G: internal bulk "change author" shape
+    await record("internal bulk change-author", async () => {
+      const r = await rawFetch("PUT", `/api/_/solutions/articles/bulk_update`, { ids: [draftId], properties: { agent_id: agentId } });
+      const back = await readInternalAgent();
+      return { status: r.status, isLoginPage: /text\/html/i.test(r.contentType), internalAgentIdAfter: back, applied: Number(back) === agentId };
+    });
+    // H: does the internal GET even expose the author on this instance?
+    await record("internal GET /api/_/solutions/articles/:id (read-back)", async () => {
+      const r = await rawFetch("GET", `/api/_/solutions/articles/${draftId}`);
+      return { status: r.status, isLoginPage: /text\/html/i.test(r.contentType), agentIdField: r.body?.agent_id ?? r.body?.article?.agent_id ?? "(absent)" };
     });
 
     // cleanup the draft (moves to trash, restorable)
