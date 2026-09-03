@@ -169,19 +169,26 @@ async function saveArticle(client, data, id, { author, byline = true } = {}) {
   let article = await save(data);
   let agentIdRejected = false;
 
-  // Set the author afterward via a dedicated JSON update (agent_id = "ID of the agent who created the article").
-  if (wantAgentId && Number(article.agent_id) !== wantAgentId) {
-    try {
-      const updated = await client.updateArticle(article.id, { agent_id: wantAgentId });
-      if (updated) article = updated;
-    } catch (e) {
-      if (!(e instanceof FreshserviceError)) throw e;
-      agentIdRejected = true; // instance refuses agent_id even on update → byline fallback below
+  // Set the author afterward via a dedicated JSON update. The writable field name differs by instance:
+  // this Freshservice instance accepts `user_id` (agent_id → "invalid_field"); Freshdesk/newer docs use `agent_id`.
+  // We try each and treat it as applied only when the response echoes the id back (safe: no false "native").
+  let authorField = null;
+  if (wantAgentId) {
+    for (const field of ["user_id", "agent_id"]) {
+      try {
+        const updated = await client.updateArticle(article.id, { [field]: wantAgentId });
+        if (updated) article = updated;
+        if (Number(updated?.[field]) === wantAgentId) { authorField = field; break; }
+      } catch (e) {
+        if (!(e instanceof FreshserviceError)) throw e; // network etc. → real error
+        // 400 / invalid_field for this name → try the next field name
+      }
     }
+    if (!authorField) agentIdRejected = true; // no field accepted → byline fallback below
   }
 
-  // native author applied? (only decidable when Freshservice returns agent_id)
-  const nativeAuthor = wantAgentId ? Number(article.agent_id) === wantAgentId : null;
+  // native author applied? true only when a field name was accepted AND echoed the requested id
+  const nativeAuthor = wantAgentId ? authorField !== null : null;
 
   // post-processing of the description: image URLs + byline fallback
   let description = data.description;
@@ -239,7 +246,7 @@ async function saveArticle(client, data, id, { author, byline = true } = {}) {
   return {
     article,
     images: { attached: files.length - unmapped.length, unmapped, missing: missingUploads },
-    author: wantAgentId ? { requested: wantAgentId, native: nativeAuthor, rejected: agentIdRejected, byline: bylineUsed, actual_agent_id: article.agent_id ?? null } : null,
+    author: wantAgentId ? { requested: wantAgentId, native: nativeAuthor, field: authorField, rejected: agentIdRejected, byline: bylineUsed, actual_agent_id: article.agent_id ?? article.user_id ?? null } : null,
   };
 }
 
@@ -428,11 +435,16 @@ app.post("/api/fs/author-probe", wrap(async (req, res) => {
       catch { return null; }
     };
 
-    // D: alternate writable field names via the documented v2 endpoint
+    // D: alternate writable field names via the documented v2 endpoint (this instance uses user_id)
     for (const field of ["user_id", "author_id", "owner_id", "created_by", "created_by_id"]) {
       await record(`v2 PUT { ${field} }`, async () => {
         const r = await rawFetch("PUT", `/api/v2/solutions/articles/${draftId}`, { [field]: agentId });
-        return { status: r.status, rejected: r.body?.errors?.[0]?.code || null, echoed: r.body?.article?.[field] ?? r.body?.[field] ?? null };
+        const echoed = r.body?.article?.[field] ?? r.body?.[field] ?? null;
+        const applied = r.ok && Number(echoed) === agentId;
+        // confirm persistence with an independent re-read of the same field
+        let persisted = null;
+        if (applied) { const g = await rawFetch("GET", `/api/v2/solutions/articles/${draftId}`); persisted = g.body?.article?.[field] ?? g.body?.[field] ?? null; }
+        return { status: r.status, rejected: r.body?.errors?.[0]?.code || null, echoed, applied: applied || undefined, persistedValue: persisted ?? undefined };
       });
     }
     // E: nested payload shapes
