@@ -421,6 +421,26 @@
     }
   });
 
+  $("#btn-cfg-author-probe").addEventListener("click", async () => {
+    const agentId = state.settings?.authorAgentId;
+    if (!agentId) { setStatus("#cfg-test-result", 'Bitte zuerst oben unter „Ich bin" einen Autor festlegen.', "err"); return; }
+    setStatus("#cfg-test-result", '<span class="spinner"></span>Autor-Diagnose läuft (Test-Entwurf wird angelegt und wieder gelöscht)…', "info");
+    try {
+      const r = await api("/api/fs/author-probe", { method: "POST", body: { agentId: Number(agentId) } });
+      const head = r.verdict === "AUTHOR_SETTABLE"
+        ? `<div class="msg msg-ok"><b>Autor lässt sich per API setzen ✓</b> — der Fix greift auf dieser Instanz.</div>`
+        : `<div class="msg msg-err"><b>Autor lässt sich per API NICHT setzen ✗</b> — Freshservice behält den API-Key-Besitzer (Agent #${esc(r.ownerAgentId)}) als Autor.</div>`;
+      const rows = (r.steps || []).map((s) => {
+        const status = s.ok ? (s.applied === true ? "✓ gesetzt" : s.applied === false ? "· keine Änderung" : "· ok") : `✗ Fehler${s.status ? " " + s.status : ""}`;
+        const detail = s.error ? ` – ${esc(s.error)}` : (s.returnedAgentId !== undefined ? ` (agent_id=${esc(s.returnedAgentId)})` : "");
+        return `<div class="small" style="font-family:monospace">${esc(s.label)}: ${status}${detail}</div>`;
+      }).join("");
+      $("#cfg-test-result").innerHTML = head + `<details style="margin-top:6px"><summary class="small muted">Details (${(r.steps || []).length} Schritte) – zum Kopieren</summary><div style="margin-top:4px">${rows}</div><pre class="small" style="white-space:pre-wrap;margin-top:6px">${esc(JSON.stringify(r, null, 2))}</pre></details>`;
+    } catch (e) {
+      setStatus("#cfg-test-result", "Diagnose fehlgeschlagen: " + esc(e.message), "err");
+    }
+  });
+
   // ---------------------------------------------------------------- tree / folders
   async function loadTree(force = false) {
     if (!state.config?.hasFreshserviceKey || !state.config?.freshserviceDomain) {

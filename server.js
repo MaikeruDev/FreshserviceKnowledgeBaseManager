@@ -348,6 +348,84 @@ app.get("/api/fs/agents", wrap(async (req, res) => {
   });
 }));
 
+/**
+ * Author diagnostics: create a throwaway draft, try several strategies to set its author via the API,
+ * report verbatim what Freshservice actually did, then delete the draft again. Read this to find out which
+ * (if any) author-setting call works on THIS instance. body: { agentId, folderId? }
+ */
+app.post("/api/fs/author-probe", wrap(async (req, res) => {
+  const client = fsClient(req);
+  const agentId = Number(req.body?.agentId);
+  if (!agentId) return res.status(400).json({ error: "agentId fehlt." });
+
+  // find a folder to create the draft in
+  let folderId = Number(req.body?.folderId) || null;
+  if (!folderId) {
+    for (const cat of await client.categories()) {
+      const folders = await client.folders(cat.id);
+      if (folders.length) { folderId = folders[0].id; break; }
+    }
+  }
+  if (!folderId) return res.status(400).json({ error: "Keine Solution-Ordner gefunden (folderId übergeben)." });
+
+  const steps = [];
+  const record = async (label, fn) => {
+    try { const v = await fn(); steps.push({ label, ok: true, ...v }); return v; }
+    catch (e) { steps.push({ label, ok: false, status: e.status ?? null, error: e.message, body: e.body ?? null }); return null; }
+  };
+
+  let draftId = null;
+  const owner = await record("create clean draft (no agent_id)", async () => {
+    const a = await client.createArticle({ title: `__author-probe ${Date.now() % 100000}`, description: "<p>probe</p>", folder_id: folderId, status: 1 });
+    draftId = a.id;
+    return { articleId: a.id, returnedAgentId: a.agent_id ?? null };
+  });
+
+  if (draftId) {
+    // Strategy A: bare JSON update with only agent_id (the v1.2.0 path)
+    await record("PUT update { agent_id } (JSON)", async () => {
+      const a = await client.updateArticle(draftId, { agent_id: agentId });
+      return { requestedAgentId: agentId, returnedAgentId: a.agent_id ?? null, applied: Number(a.agent_id) === agentId };
+    });
+    let after = await record("re-read after strategy A", async () => {
+      const a = await client.article(draftId);
+      return { returnedAgentId: a.agent_id ?? null, applied: Number(a.agent_id) === agentId };
+    });
+
+    // Strategy B: update with agent_id + full required fields (some validators need title/description present)
+    if (!after?.applied) {
+      await record("PUT update { agent_id, title, description } (JSON)", async () => {
+        const a = await client.updateArticle(draftId, { agent_id: agentId, title: `__author-probe ${Date.now() % 100000}`, description: "<p>probe</p>" });
+        return { returnedAgentId: a.agent_id ?? null, applied: Number(a.agent_id) === agentId };
+      });
+      after = await record("re-read after strategy B", async () => {
+        const a = await client.article(draftId);
+        return { returnedAgentId: a.agent_id ?? null, applied: Number(a.agent_id) === agentId };
+      });
+    }
+
+    // Strategy C: capture the exact create-with-agent_id error (confirms whether create rejects the field)
+    await record("POST create { agent_id } (JSON) — expected to fail", async () => {
+      const a = await client.createArticle({ title: `__author-probe-c ${Date.now() % 100000}`, description: "<p>probe</p>", folder_id: folderId, status: 1, agent_id: agentId });
+      // if it somehow succeeds, clean it up too
+      try { await client.deleteArticle(a.id); } catch { /* ignore */ }
+      return { createdAgentId: a.agent_id ?? null, applied: Number(a.agent_id) === agentId };
+    });
+
+    // cleanup the draft (moves to trash, restorable)
+    await record("delete draft (cleanup)", async () => { await client.deleteArticle(draftId); return {}; });
+  }
+
+  const applied = steps.some((s) => s.ok && s.applied === true);
+  res.json({
+    verdict: applied ? "AUTHOR_SETTABLE" : "AUTHOR_NOT_SETTABLE_VIA_API",
+    ownerAgentId: owner?.returnedAgentId ?? null,
+    requestedAgentId: agentId,
+    folderId,
+    steps,
+  });
+}));
+
 // ---- images -----------------------------------------------------------------
 
 /** Editor image upload: { filename, mime, data(base64) } → temporary URL used inside the editor until save. */
