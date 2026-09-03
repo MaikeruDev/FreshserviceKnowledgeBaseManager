@@ -159,39 +159,24 @@ async function saveArticle(client, data, id, { author, byline = true } = {}) {
   }
 
   const wantAgentId = author?.agent_id ? Number(author.agent_id) : null;
-  // Multipart whenever an author is requested: Freshservice's strict JSON validator rejects the undocumented
-  // agent_id field ("invalid_field"), while the multipart endpoint accepts it on instances where it works at all.
+  // Create/update the article WITHOUT agent_id. Freshservice's create validator rejects agent_id as an
+  // "invalid_field"; the writable path is a *separate* update on the finished article (this mirrors the
+  // Freshdesk Solution-Article API, where agent_id is a documented parameter of "Update a Solution Article").
   const save = async (payload) =>
-    files.length || payload.agent_id !== undefined
-      ? client.saveArticleWithAttachments(payload, files, id)
+    files.length ? client.saveArticleWithAttachments(payload, files, id)
       : id ? client.updateArticle(id, payload) : client.createArticle(payload);
 
-  let article;
+  let article = await save(data);
   let agentIdRejected = false;
-  try {
-    article = await save(wantAgentId ? { ...data, agent_id: wantAgentId } : data);
-  } catch (e) {
-    // instance rejects the undocumented field → retry without it
-    // (the field name may only appear in the errors[] array, not in the description text)
-    const rejectsAgentId =
-      /agent_id/i.test(e.message || "") ||
-      (Array.isArray(e.body?.errors) && e.body.errors.some((x) => /agent_id/i.test(x.field || "")));
-    if (wantAgentId && e instanceof FreshserviceError && e.status === 400 && rejectsAgentId) {
-      agentIdRejected = true;
-      article = await save(data);
-    } else {
-      throw e;
-    }
-  }
 
-  // some instances only honor the author when it is set AFTER creation, as a bare JSON update on the existing
-  // article ("erst erstellen, dann Agent setzen") — inline agent_id is ignored (multipart) or rejected (JSON create)
+  // Set the author afterward via a dedicated JSON update (agent_id = "ID of the agent who created the article").
   if (wantAgentId && Number(article.agent_id) !== wantAgentId) {
     try {
-      article = await client.updateArticle(article.id, { agent_id: wantAgentId });
+      const updated = await client.updateArticle(article.id, { agent_id: wantAgentId });
+      if (updated) article = updated;
     } catch (e) {
       if (!(e instanceof FreshserviceError)) throw e;
-      if (e.status === 400) agentIdRejected = true;
+      agentIdRejected = true; // instance refuses agent_id even on update → byline fallback below
     }
   }
 
