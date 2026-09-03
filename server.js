@@ -183,6 +183,17 @@ async function saveArticle(client, data, id, { author, byline = true } = {}) {
     }
   }
 
+  // some instances only honor the author when it is set AFTER creation, as a bare JSON update on the existing
+  // article ("erst erstellen, dann Agent setzen") — inline agent_id is ignored (multipart) or rejected (JSON create)
+  if (wantAgentId && Number(article.agent_id) !== wantAgentId) {
+    try {
+      article = await client.updateArticle(article.id, { agent_id: wantAgentId });
+    } catch (e) {
+      if (!(e instanceof FreshserviceError)) throw e;
+      if (e.status === 400) agentIdRejected = true;
+    }
+  }
+
   // native author applied? (only decidable when Freshservice returns agent_id)
   const nativeAuthor = wantAgentId ? Number(article.agent_id) === wantAgentId : null;
 

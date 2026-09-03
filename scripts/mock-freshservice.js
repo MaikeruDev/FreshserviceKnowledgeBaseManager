@@ -126,6 +126,9 @@ const acceptAgentId = process.env.MOCK_ACCEPT_AGENT_ID === "1";
 // MOCK_REJECT_AGENT_ID=1 simulates instances that hard-reject the field (like real Freshservice JSON create):
 // {"description":"Validation failed","errors":[{"field":"agent_id","message":"Unexpected/invalid field in request","code":"invalid_field"}]}
 const rejectAgentId = process.env.MOCK_REJECT_AGENT_ID === "1";
+// MOCK_AGENT_ID_UPDATE_ONLY=1: create ignores agent_id, but a bare JSON update on the existing article applies it
+// ("erst erstellen, dann Agent setzen")
+const acceptAgentIdOnUpdate = process.env.MOCK_AGENT_ID_UPDATE_ONLY === "1";
 const agentIdRejection = (req, res) => {
   if (rejectAgentId && req.body.agent_id !== undefined) {
     res.status(400).json({ description: "Validation failed", errors: [{ field: "agent_id", message: "Unexpected/invalid field in request", code: "invalid_field" }] });
@@ -192,7 +195,8 @@ app.put("/api/v2/solutions/articles/:id", (req, res) => {
   if (/src="data:image/i.test(req.body.description || "")) return res.status(400).json({ description: "Validation failed", errors: [{ field: "description", message: "Base64 images are not supported" }] });
   const { agent_id: requestedAgent, ...rest } = req.body;
   Object.assign(a, rest, { updated_at: now(), modified_by: API_USER_ID });
-  if (requestedAgent && acceptAgentId) a.agent_id = Number(requestedAgent);
+  const isMultipart = /multipart/i.test(req.headers["content-type"] || "");
+  if (requestedAgent && (acceptAgentId || (acceptAgentIdOnUpdate && !isMultipart))) a.agent_id = Number(requestedAgent);
   if (req.body.folder_id) a.folder_id = Number(req.body.folder_id);
   if (req.body.status) a.status = Number(req.body.status);
   if (req.body.description) a.description_text = String(req.body.description).replace(/<[^>]+>/g, " ").trim();
