@@ -203,6 +203,7 @@
     state.settings = loadSettings();
     let server = { envDefaults: {}, defaults: { aiModel: "gpt-5.5", aiEffort: "medium" } };
     try { server = await api("/api/config"); } catch (e) { toast("Server nicht erreichbar: " + e.message, "err"); }
+    if (server.version) $("#app-version").textContent = "v" + server.version;
     const env = server.envDefaults || {};
     const s = state.settings;
     state.config = {

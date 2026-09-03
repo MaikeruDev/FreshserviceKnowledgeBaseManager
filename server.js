@@ -8,6 +8,7 @@ import { FreshserviceClient, FreshserviceError } from "./lib/freshservice.js";
 import { generateArticleTurn, buildInitialUserMessage, buildChangeRequestMessage, testOpenAI, AiError } from "./lib/ai.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const APP_VERSION = JSON.parse(fs.readFileSync(path.join(__dirname, "package.json"), "utf8")).version;
 const PORT = Number(process.env.PORT || 3847);
 const HOST = process.env.HOST || "127.0.0.1";
 
@@ -260,7 +261,7 @@ async function saveArticle(client, data, id, { author, byline = true } = {}) {
 // ---- config ----------------------------------------------------------------
 
 /** Only tells the browser whether ENV defaults exist — keys themselves are never sent or stored here. */
-app.get("/api/config", (req, res) => res.json(publicConfig()));
+app.get("/api/config", (req, res) => res.json({ ...publicConfig(), version: APP_VERSION }));
 
 app.post("/api/config/test", wrap(async (req, res) => {
   const c = credsFromRequest(req);
